@@ -1,0 +1,50 @@
+# ── Secrets ──
+.env
+.env.local
+.env.*.local
+
+# ── Python ──
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+
+# ── TypeScript / Node ──
+node_modules/
+packages/*/dist/
+packages/*/node_modules/
+*.tsbuildinfo
+
+# ── IDE ──
+.vscode/settings.json
+.idea/
+*.swp
+*.swo
+*~
+
+# ── OS ──
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── Neo4j local data ──
+infra/neo4j/data/
+infra/neo4j/logs/
+
+# ── ECC session state ──
+.ecc/
+
+# ── Logs ──
+*.log
+logs/

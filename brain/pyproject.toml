@@ -1,0 +1,110 @@
+[build-system]
+requires = ["hatchling>=1.25.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "self-healing-brain"
+version = "0.1.0"
+description = "Analytical reasoning brain for the Privacy-First Simulation-Gated AI SRE Agent. Deterministic FSM orchestration, regex pre-filtering, bi-temporal graph queries."
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.12"
+authors = [
+    { name = "Self-Healing SRE Team" }
+]
+
+dependencies = [
+    # ── Web Framework ──
+    "fastapi[standard]>=0.115.0",
+    "uvicorn[standard]>=0.34.0",
+
+    # ── Data Validation ──
+    "pydantic>=2.11.0",
+    "pydantic-settings>=2.8.0",
+
+    # ── Graph Database ──
+    "neo4j>=5.28.0",
+    "graphiti-core>=0.6.0",
+
+    # ── Sandbox Execution ──
+    "e2b>=1.3.0",
+
+    # ── Telemetry Pre-Filtering ──
+    "pyarrow>=19.0.0",
+
+    # ── HTTP Client ──
+    "httpx>=0.28.0",
+
+    # ── Utilities ──
+    "python-dotenv>=1.1.0",
+    "structlog>=25.1.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3.0",
+    "pytest-asyncio>=1.0.0",
+    "pytest-cov>=6.1.0",
+    "httpx>=0.28.0",
+    "ruff>=0.11.0",
+    "mypy>=1.15.0",
+    "pre-commit>=4.2.0",
+]
+
+[project.scripts]
+brain = "app.main:start"
+
+# ── Ruff Configuration ──
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # pyflakes
+    "I",    # isort
+    "N",    # pep8-naming
+    "UP",   # pyupgrade
+    "B",    # flake8-bugbear
+    "S",    # flake8-bandit (security)
+    "A",    # flake8-builtins
+    "T20",  # flake8-print (no print in prod)
+    "SIM",  # flake8-simplify
+    "TCH",  # flake8-type-checking
+    "RUF",  # ruff-specific rules
+]
+ignore = [
+    "S101",  # allow assert in tests
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["app"]
+
+# ── Pytest Configuration ──
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+filterwarnings = [
+    "error",
+    "ignore::DeprecationWarning:neo4j.*",
+]
+
+# ── Mypy Configuration ──
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+disallow_any_generics = true
+check_untyped_defs = true
+
+[[tool.mypy.overrides]]
+module = [
+    "neo4j.*",
+    "graphiti_core.*",
+    "e2b.*",
+]
+ignore_missing_imports = true

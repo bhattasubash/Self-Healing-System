@@ -1,0 +1,145 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://self-healing.local/schemas/tool-call.schema.json",
+  "title": "ToolCall",
+  "description": "MCP tool call envelope for JSON-RPC communication between the local MCP client and the analytical brain. Every tool invocation and its result are wrapped in this format. All fields containing infrastructure identifiers MUST be masked via the reversible tokenizer before transit.",
+  "type": "object",
+  "required": [
+    "id",
+    "tool_name",
+    "arguments",
+    "timestamp",
+    "session_id",
+    "status",
+    "masked"
+  ],
+  "properties": {
+    "id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "Unique identifier for this tool call instance."
+    },
+    "tool_name": {
+      "type": "string",
+      "enum": [
+        "prometheus_query",
+        "datadog_query",
+        "kubernetes_status",
+        "graph_temporal_query",
+        "log_search",
+        "alert_list"
+      ],
+      "description": "Registered tool name from the tool registry manifest."
+    },
+    "arguments": {
+      "type": "object",
+      "description": "Tool-specific parameters. Schema varies by tool_name. Values are masked tokens when masked=true.",
+      "additionalProperties": true
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO 8601 timestamp of when the tool call was initiated."
+    },
+    "session_id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "Session identifier binding this call to its masking dictionary lifecycle. Dictionary is destroyed when session ends."
+    },
+    "status": {
+      "type": "string",
+      "enum": ["pending", "running", "success", "error", "timeout"],
+      "description": "Current execution status of the tool call."
+    },
+    "masked": {
+      "type": "boolean",
+      "description": "Whether reversible ID masking has been applied to arguments and result data. Must be true for any data leaving the MCP client boundary."
+    },
+    "result": {
+      "oneOf": [
+        { "$ref": "#/$defs/ToolResult" },
+        { "type": "null" }
+      ],
+      "default": null,
+      "description": "Populated on success. Contains the query result payload."
+    },
+    "error": {
+      "oneOf": [
+        { "$ref": "#/$defs/ToolError" },
+        { "type": "null" }
+      ],
+      "default": null,
+      "description": "Populated on error. Contains structured error information."
+    },
+    "duration_ms": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Wall-clock execution time in milliseconds. Set when status transitions to a terminal state."
+    },
+    "retry_count": {
+      "type": "integer",
+      "minimum": 0,
+      "default": 0,
+      "description": "Number of retry attempts made for this call."
+    },
+    "max_retries": {
+      "type": "integer",
+      "minimum": 0,
+      "default": 3,
+      "description": "Maximum retry attempts before marking as error."
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "ToolResult": {
+      "type": "object",
+      "description": "Successful tool execution result. Data payloads are masked and pre-filtered before reaching the LLM reasoning layer.",
+      "required": ["data", "truncated", "row_count"],
+      "properties": {
+        "data": {
+          "description": "The query result payload. Structure depends on tool_name. All string values containing infrastructure identifiers are masked tokens."
+        },
+        "truncated": {
+          "type": "boolean",
+          "description": "Whether the result was truncated to stay within context budget limits."
+        },
+        "row_count": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Total number of data rows before any truncation."
+        },
+        "token_estimate": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Estimated token count of the serialized result. Used by the pre-filter to enforce context budget."
+        }
+      },
+      "additionalProperties": false
+    },
+    "ToolError": {
+      "type": "object",
+      "description": "Structured error from a failed tool execution.",
+      "required": ["code", "message", "retryable"],
+      "properties": {
+        "code": {
+          "type": "string",
+          "description": "Machine-readable error code (e.g., 'PROMETHEUS_TIMEOUT', 'AUTH_FAILED', 'QUERY_SYNTAX')."
+        },
+        "message": {
+          "type": "string",
+          "maxLength": 2000,
+          "description": "Human-readable error description. Must NOT contain unmasked infrastructure identifiers."
+        },
+        "retryable": {
+          "type": "boolean",
+          "description": "Whether this error is transient and the call should be retried with backoff."
+        },
+        "upstream_status": {
+          "type": "integer",
+          "description": "HTTP status code from the upstream telemetry provider, if applicable."
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

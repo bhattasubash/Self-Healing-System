@@ -1,0 +1,166 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://self-healing.local/schemas/telemetry.schema.json",
+  "title": "TelemetryEvent",
+  "description": "Normalized telemetry event format emitted after reversible ID masking and regex pre-filtering. This is the canonical input to the analytical reasoning brain. All infrastructure identifiers in labels are replaced with reversible masked tokens. Filter statistics track the compression ratio achieved by the regex-first pipeline.",
+  "type": "object",
+  "required": [
+    "event_id",
+    "source",
+    "metric_name",
+    "data_points",
+    "labels",
+    "severity",
+    "timestamp",
+    "session_id",
+    "masking_applied",
+    "filter_stats"
+  ],
+  "properties": {
+    "event_id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "Unique identifier for this telemetry event."
+    },
+    "source": {
+      "type": "string",
+      "enum": ["prometheus", "datadog", "kubernetes", "cloudwatch", "custom"],
+      "description": "The telemetry provider that originated this event."
+    },
+    "metric_name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512,
+      "description": "Fully qualified metric name (e.g., 'container_cpu_usage_seconds_total')."
+    },
+    "data_points": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/DataPoint" },
+      "minItems": 1,
+      "maxItems": 10000,
+      "description": "Time-series data points. Array is sorted by timestamp ascending. Capped at 10k points; overflow triggers aggregation in the pre-filter."
+    },
+    "labels": {
+      "type": "object",
+      "additionalProperties": { "type": "string" },
+      "description": "Key-value metric labels. When masking_applied=true, values containing infrastructure identifiers (IPs, hostnames, cluster IDs, namespaces) are replaced with reversible masked tokens (e.g., 'MASKED_HOST_a7f3')."
+    },
+    "severity": {
+      "type": "string",
+      "enum": ["info", "warning", "critical", "fatal"],
+      "description": "Event severity level. Determined by the pre-filter's threshold rules or inherited from the source alert."
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO 8601 timestamp when this event was captured by the MCP client."
+    },
+    "session_id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "Session binding for masking dictionary lookup. Same session_id across tool calls and telemetry events means the same token dictionary."
+    },
+    "masking_applied": {
+      "type": "boolean",
+      "description": "Whether reversible ID masking was applied to labels and data_points. Must be true before data crosses any process boundary."
+    },
+    "filter_stats": {
+      "$ref": "#/$defs/FilterStats",
+      "description": "Statistics from the regex/PyArrow pre-filtering stage. Used for observability and to verify the context budget is respected."
+    },
+    "trace_id": {
+      "type": "string",
+      "maxLength": 128,
+      "description": "Distributed trace correlation ID (e.g., W3C traceparent). Optional — present for span-level events."
+    },
+    "span_id": {
+      "type": "string",
+      "maxLength": 64,
+      "description": "Span identifier within a distributed trace. Optional — present for span-level events."
+    },
+    "anomaly_score": {
+      "type": "number",
+      "minimum": 0.0,
+      "maximum": 1.0,
+      "description": "Pre-computed anomaly score from the local statistical detector (0=normal, 1=definite anomaly). Only the pre-filter computes this; the LLM never sets it."
+    },
+    "deduplicated": {
+      "type": "boolean",
+      "default": false,
+      "description": "Whether this event was deduplicated against recent identical events in the same session. Per regex-vs-llm-structured-text skill: identical runtime errors are collapsed locally."
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "DataPoint": {
+      "type": "object",
+      "description": "A single time-series observation. Values are raw numerics; the metric_name and labels provide context.",
+      "required": ["timestamp", "value"],
+      "properties": {
+        "timestamp": {
+          "type": "string",
+          "format": "date-time",
+          "description": "ISO 8601 timestamp of the observation."
+        },
+        "value": {
+          "type": "number",
+          "description": "Numeric metric value at the given timestamp."
+        },
+        "unit": {
+          "type": "string",
+          "description": "Unit of measurement (e.g., 'bytes', 'seconds', 'ratio'). Optional; inferred from metric_name conventions when absent."
+        }
+      },
+      "additionalProperties": false
+    },
+    "FilterStats": {
+      "type": "object",
+      "description": "Pre-filter stage statistics. These numbers prove that the regex-first pipeline is compressing trace data before it reaches the LLM context window.",
+      "required": [
+        "raw_line_count",
+        "filtered_line_count",
+        "filter_method",
+        "compression_ratio"
+      ],
+      "properties": {
+        "raw_line_count": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Total lines of raw telemetry before filtering."
+        },
+        "filtered_line_count": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Lines remaining after regex/PyArrow filtering. This is what reaches the LLM."
+        },
+        "filter_method": {
+          "type": "string",
+          "enum": ["regex", "pyarrow", "hybrid", "none"],
+          "description": "Which pre-filter engine was used. 'hybrid' means both regex and PyArrow were applied in sequence."
+        },
+        "compression_ratio": {
+          "type": "number",
+          "minimum": 0.0,
+          "maximum": 1.0,
+          "description": "Ratio of filtered_line_count / raw_line_count. Lower values indicate more aggressive filtering. Target: < 0.05 for high-volume traces."
+        },
+        "duplicate_lines_removed": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Number of duplicate/identical lines collapsed by the regex deduplicator."
+        },
+        "token_estimate_before": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Estimated token count of raw data before filtering."
+        },
+        "token_estimate_after": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Estimated token count after filtering. Must be within context_budget_max."
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}
