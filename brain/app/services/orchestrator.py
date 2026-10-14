@@ -49,6 +49,7 @@ if TYPE_CHECKING:
         TemporalStore as BiTemporalGraphStore,
     )
 
+from app.services.content_scanner import ContentScanner
 from app.services.post_mortem import RunLorePostMortemGenerator
 from app.services.pre_filter import TracePreFilter
 from app.services.state_machine import (
@@ -117,6 +118,15 @@ class SREOrchestrationCoordinator:
         if unmasked:
             fsm.fail("Data perimeter violation: unmasked telemetry received.")
             raise ValueError(f"Found {len(unmasked)} unmasked telemetry events")
+
+        # Server-side content scan: Fail-closed verification (PRD D-14, Section 8)
+        scanner = ContentScanner()
+        scan_result = scanner.scan_payload([e.model_dump() for e in events])
+        if not scan_result.is_clean:
+            fsm.fail("Data perimeter violation: server-side scan detected unmasked secrets.")
+            raise ValueError(
+                f"Server-side content scan detected {len(scan_result.findings)} unmasked secret(s)"
+            )
 
         target_services = sorted({
             e.labels.get("app") or e.labels.get("service") or e.metric_name

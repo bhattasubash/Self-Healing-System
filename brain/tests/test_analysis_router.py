@@ -72,6 +72,24 @@ def test_analyze_rejects_unmasked_telemetry(client: TestClient) -> None:
     assert "Data perimeter violation" in response.json()["detail"]
 
 
+def test_analyze_rejects_unmasked_secret_even_if_flag_true(client: TestClient) -> None:
+    event = _build_masked_event()
+    event["masking_applied"] = True  # Client claims masked
+    # Server scan catches unmasked secret
+    event["labels"]["db_conn"] = "postgres" + "://admin:SuperSecretPass123!@db:5432/prod"
+
+    response = client.post(
+        "/api/v1/analyze",
+        json={
+            "events": [event],
+            "session_id": "c0000000-0000-0000-0000-000000000005",
+        },
+    )
+
+    assert response.status_code == 400
+    assert "Server-side content scan detected" in response.json()["detail"]
+
+
 def test_analyze_processes_valid_telemetry(client: TestClient) -> None:
     event1 = _build_masked_event(metric_name="container_cpu_usage", severity=Severity.CRITICAL)
     event2 = _build_masked_event(

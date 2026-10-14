@@ -20,6 +20,7 @@ from app.schemas.telemetry import (
     AnalysisResponse,
     FSMStateName,
 )
+from app.services.content_scanner import ContentScanner
 from app.services.pre_filter import TracePreFilter
 from app.services.state_machine import (
     IncidentContext,
@@ -66,6 +67,22 @@ async def analyze_telemetry(
             detail=(
                 f"Data perimeter violation: {len(unmasked_events)} telemetry event(s) "
                 f"did not have reversible masking applied."
+            ),
+        )
+
+    # Server-side content scan: Fail-closed verification (PRD D-14, Section 8)
+    scanner = ContentScanner()
+    scan_result = scanner.scan_payload(request.model_dump())
+    if not scan_result.is_clean:
+        req_logger.error(
+            "unmasked_secret_detected_by_server_scan",
+            findings=[f.secret_class for f in scan_result.findings],
+        )
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"Data perimeter violation: Server-side content scan detected "
+                f"{len(scan_result.findings)} unmasked secret(s) in telemetry payload."
             ),
         )
 
