@@ -6,11 +6,18 @@ Drives the unified event lifecycle across all subsystems:
 
 Integrates:
 - TracePreFilter (regex-first deduplication & noise removal)
-- BiTemporalGraphStore (Neo4j topology diff lookups)
+- BiTemporalGraphStore / TemporalStore (topology diff lookups)
 - E2BMicroSandboxRunner (Static security barrier & simulation validation)
 - GitWorktreeManager (YYLO pattern code & config isolation)
 - build_slack_approval_card (Human verification card dispatch)
 - RunLorePostMortemGenerator (Automated markdown post-mortem compilation)
+
+SAFETY INVARIANTS (Step 1):
+- DEPLOY is strictly reachable only via real executed, verified action.
+- Never write "resolved" unless verification passed.
+- No canned root cause, no fake commit hashes, no hard-coded namespace.
+- Explicit errors on graph and worktree failures (no silent fallbacks).
+- Validated incident IDs across all paths.
 """
 
 from __future__ import annotations
@@ -19,6 +26,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 import structlog
+from pydantic import BaseModel, Field
 
 from app.config import Settings, get_settings
 from app.routers.approval import build_slack_approval_card
@@ -29,8 +37,11 @@ from app.schemas.telemetry import (
     Severity,
     TelemetryEvent,
 )
+from app.utils.validation import validate_incident_id
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
     from app.services.graph_store import BiTemporalGraphStore, TemporalGraphDiff
 
 from app.services.post_mortem import RunLorePostMortemGenerator
@@ -41,6 +52,18 @@ from app.services.state_machine import (
 )
 
 logger = structlog.get_logger()
+
+
+class RemediationExecutionResult(BaseModel):
+    """Result of a real executed and verified remediation action."""
+
+    action_type: str
+    target_uid: str
+    verification_passed: bool
+    details: str
+    undo_available: bool = False
+    audit_hash: str | None = None
+    executed_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
 class SREOrchestrationCoordinator:
@@ -77,6 +100,9 @@ class SREOrchestrationCoordinator:
         Executes stages 1 through 4 of the incident lifecycle:
         INGEST ──► FILTER ──► ANALYZE ──► SANDBOX ──► APPROVE
         """
+        if incident_id:
+            validate_incident_id(incident_id)
+
         context = IncidentContext(incident_id=incident_id, session_id=session_id)
         context.events = events
         fsm = SREStateMachine(context=context, initial_state=FSMStateName.INGEST)
@@ -90,8 +116,16 @@ class SREOrchestrationCoordinator:
         target_services = sorted({
             e.labels.get("app") or e.labels.get("service") or e.metric_name
             for e in events
+            if (e.labels.get("app") or e.labels.get("service") or e.metric_name)
         })
-        context.target_services = [s for s in target_services if s]
+        context.target_services = target_services
+        target_svc = target_services[0] if target_services else "unknown-service"
+
+        # Resolve namespace dynamically from event labels (never hardcode)
+        target_namespace = next(
+            (e.labels.get("namespace") for e in events if e.labels.get("namespace")),
+            "default",
+        )
         context.severity = max((e.severity.value for e in events), default=Severity.CRITICAL.value)
 
         # ── 2. FILTER: REGEX-FIRST PRE-FILTERING ──
@@ -108,44 +142,47 @@ class SREOrchestrationCoordinator:
         context.filtered_line_count = len(filter_result.filtered_lines)
         context.prefilter_compression_ratio = filter_result.stats.compression_ratio
 
-        # ── 3. ANALYZE: BI-TEMPORAL TOPOLOGY & ROOT CAUSE ──
+        # ── 3. ANALYZE: BI-TEMPORAL TOPOLOGY & EVIDENCE ──
         fsm.transition_to(
             FSMStateName.ANALYZE,
             reason="Pre-filtering complete; inspecting bi-temporal state graph",
             metadata={"compression_ratio": filter_result.stats.compression_ratio},
         )
 
-        # Extract graph diff if graph store is available
         now = datetime.now(UTC)
         graph_diff: TemporalGraphDiff | None = None
         if self.graph_store:
             try:
-                # Compare baseline state from 10 minutes prior with incident onset
                 t_baseline = datetime.fromtimestamp(now.timestamp() - 600, tz=UTC)
                 graph_diff = await self.graph_store.diff_snapshots(t1=t_baseline, t2=now)
                 context.graph_diff = graph_diff
             except Exception as graph_err:
-                self._log.warning("graph_diff_extraction_skipped", error=str(graph_err))
+                self._log.error("graph_diff_extraction_failed", error=str(graph_err))
+                fsm.fail(f"Bi-temporal graph store query failed: {graph_err}")
+                raise RuntimeError(
+                    f"Bi-temporal graph store query failed: {graph_err}"
+                ) from graph_err
 
+        # Factual telemetry-backed summary (no canned claims)
+        svc_list = ", ".join(context.target_services)
         context.root_cause_summary = (
-            f"Observed critical metric spike across {len(context.target_services)} service(s). "
-            f"Pre-filter isolated {context.filtered_line_count} error frames "
-            f"from {context.raw_line_count} lines "
-            f"({filter_result.stats.compression_ratio:.2%} compression ratio)."
+            f"Observed incident across {len(context.target_services)} service(s): {svc_list}. "
+            f"Namespace: {target_namespace}. Pre-filter preserved "
+            f"{context.filtered_line_count} error frame(s) "
+            f"from {context.raw_line_count} raw line(s). Evidence Gate evaluation pending."
         )
 
-        # Generate candidate remediation fix script
-        target_svc = context.target_services[0] if context.target_services else "payment-gateway"
+        # Candidate simulation script generated dynamically from target service & namespace
         fix_script_code = (
             f"#!/usr/bin/env bash\n"
-            f"# Automated Remediation for {target_svc}\n"
-            f"kubectl rollout restart deployment/{target_svc} -n payments\n"
-            f"kubectl rollout status deployment/{target_svc} -n payments --timeout=60s\n"
+            f"# Remediation verification check for {target_svc} in namespace {target_namespace}\n"
+            f"kubectl rollout status deployment/{target_svc} -n {target_namespace} --timeout=60s\n"
         )
         context.proposed_fix_script = {
             "language": "bash",
             "content": fix_script_code,
             "target_service": target_svc,
+            "target_namespace": target_namespace,
         }
 
         # ── 4. SANDBOX: SIMULATION & GIT WORKTREE ISOLATION ──
@@ -154,7 +191,7 @@ class SREOrchestrationCoordinator:
             reason="Executing simulation validation inside E2B sandbox and isolated worktree",
         )
 
-        # 4a. Isolate patch inside git worktree
+        # 4a. Isolate patch inside git worktree (fail explicitly if worktree fails)
         worktree_session: GitWorktreeSession | None = None
         try:
             worktree_session = await self.worktree_manager.create_worktree(
@@ -164,10 +201,11 @@ class SREOrchestrationCoordinator:
             await worktree_session.apply_file(patch_file, fix_script_code)
             context.worktree_diff = await worktree_session.get_diff()
         except Exception as wt_err:
-            self._log.warning("worktree_isolation_fallback", error=str(wt_err))
-            context.worktree_diff = (
-                f"# Remediation script staged: {target_svc}\n+ {fix_script_code}"
-            )
+            self._log.error("worktree_isolation_failed", error=str(wt_err))
+            fsm.fail(f"Worktree isolation failed: {wt_err}")
+            raise RuntimeError(
+                f"Failed to isolate remediation patch in worktree: {wt_err}"
+            ) from wt_err
         finally:
             if worktree_session:
                 await worktree_session.cleanup()
@@ -190,9 +228,10 @@ class SREOrchestrationCoordinator:
             metadata={"sandbox_status": sbx_result.status, "duration_ms": sbx_result.duration_ms},
         )
 
+        approval_id = f"appr-{context.incident_id[:8]}"
         slack_card = build_slack_approval_card(
             incident_id=context.incident_id,
-            approval_id=f"appr-{context.incident_id[:8]}",
+            approval_id=approval_id,
             severity=context.severity,
             service_tier=context.service_tier,
             fix_script_language="bash",
@@ -202,6 +241,7 @@ class SREOrchestrationCoordinator:
         )
         context.metadata["slack_card"] = slack_card
         context.metadata["fsm_instance"] = fsm
+        context.metadata["approval_id"] = approval_id
 
         self._log.info(
             "triage_pipeline_awaiting_approval",
@@ -217,10 +257,17 @@ class SREOrchestrationCoordinator:
         decision: str,
         decided_by: str,
         reason: str | None = None,
+        action_executor: (
+            Callable[[IncidentContext], Awaitable[RemediationExecutionResult]] | None
+        ) = None,
     ) -> IncidentContext:
         """
         Executes final stages post-human decision:
-        APPROVE ──► DEPLOY ──► COMPLETED (or ERROR if rejected)
+        APPROVE ──► DEPLOY ──► COMPLETED (or ERROR if rejected / execution unverified)
+
+        SAFETY INVARIANT (Step 1):
+        DEPLOY is only reachable via a real executed, verified action. Never writes "resolved"
+        unless verification passed.
         """
         fsm: SREStateMachine = context.metadata.get("fsm_instance") or SREStateMachine(
             context=context, initial_state=FSMStateName.APPROVE
@@ -232,25 +279,55 @@ class SREOrchestrationCoordinator:
         context.decision_reason = reason
 
         if context.approval_decision == "approved":
-            # ── 6. DEPLOY: MERGE WORKTREE / RECORD COMMIT ──
+            if action_executor is None:
+                raise RuntimeError(
+                    "Cannot deploy: No action executor provided. DEPLOY is only reachable "
+                    "via real executed, verified action."
+                )
+
+            # ── 6. DEPLOY: EXECUTE ACTION ──
             fsm.transition_to(
                 FSMStateName.DEPLOY,
-                reason=f"Approved by {decided_by}; deploying remediation fix",
+                reason=f"Approved by {decided_by}; executing remediation action",
                 metadata={"decided_by": decided_by},
             )
 
-            # Record deployment commit reference
-            context.commit_hash = f"git-rev-{datetime.now(UTC).strftime('%Y%m%d%H%M%S')}"
+            exec_result = await action_executor(context)
+
+            # VERIFICATION GATE: Never write "resolved" unless verification passed
+            if not exec_result.verification_passed:
+                fsm.fail(
+                    reason=f"Remediation action failed verification: {exec_result.details}",
+                    metadata={
+                        "action_type": exec_result.action_type,
+                        "details": exec_result.details,
+                    },
+                )
+                self._log.error(
+                    "remediation_verification_failed",
+                    incident_id=context.incident_id,
+                    details=exec_result.details,
+                )
+                context.deployment_result = {
+                    "status": "failed_verification",
+                    "details": exec_result.details,
+                    "timestamp": datetime.now(UTC).isoformat(),
+                }
+                return context
+
             context.deployment_result = {
-                "status": "deployed",
-                "commit": context.commit_hash,
-                "timestamp": datetime.now(UTC).isoformat(),
+                "status": "verified",
+                "action_type": exec_result.action_type,
+                "target_uid": exec_result.target_uid,
+                "details": exec_result.details,
+                "audit_hash": exec_result.audit_hash,
+                "timestamp": exec_result.executed_at.isoformat(),
             }
 
             # ── 7. COMPLETED & RUNLORE POST-MORTEM ──
             fsm.transition_to(
                 FSMStateName.COMPLETED,
-                reason="Deployment verified; incident fully resolved",
+                reason=f"Action verified successfully: {exec_result.details}",
             )
 
             # Auto-compile RunLore Post-Mortem Report

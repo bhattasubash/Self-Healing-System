@@ -27,6 +27,7 @@ from app.schemas.telemetry import (
     TelemetryEvent,
     TransitionRecord,
 )
+from app.utils.validation import validate_incident_id
 
 logger = structlog.get_logger()
 
@@ -67,7 +68,9 @@ class IncidentContext:
         incident_id: str | None = None,
         session_id: str | None = None,
     ) -> None:
-        self.incident_id: str = incident_id or str(uuid.uuid4())
+        self.incident_id: str = (
+            validate_incident_id(incident_id) if incident_id else str(uuid.uuid4())
+        )
         self.session_id: str = session_id or str(uuid.uuid4())
         self.events: list[TelemetryEvent] = []
         self.filtered_lines: list[str] = []

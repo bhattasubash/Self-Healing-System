@@ -121,10 +121,22 @@ class SlackSettings(BaseSettings):
         description="Slack channel ID for posting approval requests.",
     )
     approval_ttl_seconds: int = Field(
-        default=3600,
+        default=900,
         ge=60,
         le=86400,
-        description="Time-to-live for approval requests before expiry.",
+        description="Time-to-live for approval requests before expiry (15m default).",
+    )
+    dev_mode: bool = Field(
+        default=False,
+        description="Explicit development bypass mode. Must be off by default.",
+    )
+    allowed_approver_roles: list[str] = Field(
+        default_factory=lambda: ["sre-lead", "incident-commander", "admin"],
+        description="Roles permitted to approve remediation actions.",
+    )
+    approver_role_mapping: dict[str, str] = Field(
+        default_factory=dict,
+        description="Map of Slack user IDs/usernames to authorized approver roles.",
     )
 
 

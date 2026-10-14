@@ -119,7 +119,7 @@ class SandboxExecutionResult(BaseModel):
     """Execution output from an ephemeral sandbox run."""
 
     sandbox_id: str
-    status: str = Field(description="pass | fail | timeout | error")
+    status: str = Field(description="pass | fail | timeout | error | unvalidated")
     exit_code: int
     stdout: str = Field(default="", max_length=50000)
     stderr: str = Field(default="", max_length=50000)
@@ -200,8 +200,8 @@ class E2BMicroSandboxRunner:
         sandbox_id = "sandbox-sim-local"
         stdout_buf: list[str] = []
         stderr_buf: list[str] = []
-        exit_code = 0
-        run_status = "pass"
+        exit_code = 1
+        run_status = "error"
 
         try:
             api_key = self._settings.api_key.get_secret_value()
@@ -218,6 +218,7 @@ class E2BMicroSandboxRunner:
                 exit_code = getattr(exec_result, "exit_code", 0)
                 stdout_buf.append(getattr(exec_result, "stdout", ""))
                 stderr_buf.append(getattr(exec_result, "stderr", ""))
+                run_status = "pass" if exit_code == 0 else "fail"
             elif api_key:
                 # Real E2B Cloud Sandbox
                 import shlex

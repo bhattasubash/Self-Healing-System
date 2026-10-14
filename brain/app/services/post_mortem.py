@@ -14,6 +14,8 @@ from typing import TYPE_CHECKING, Final
 
 import structlog
 
+from app.utils.validation import validate_incident_id
+
 if TYPE_CHECKING:
     from app.schemas.telemetry import TransitionRecord
     from app.services.state_machine import IncidentContext
@@ -42,7 +44,10 @@ class RunLorePostMortemGenerator:
         Saves the file to `.incidents/incident-<incident_id>.md` and returns (path, content).
         """
         self.output_dir.mkdir(parents=True, exist_ok=True)
-        incident_file = self.output_dir / f"incident-{context.incident_id}.md"
+        safe_id = validate_incident_id(context.incident_id)
+        incident_file = (self.output_dir / f"incident-{safe_id}.md").resolve()
+        if not incident_file.is_relative_to(self.output_dir.resolve()):
+            raise ValueError(f"Path traversal detected in post-mortem target path: {incident_file}")
 
         now = datetime.now(UTC)
         first_transition_time = transitions[0].timestamp if transitions else now
@@ -107,7 +112,7 @@ class RunLorePostMortemGenerator:
             f"| **Detection Timestamp** | `{started_at.isoformat()}` |",
             f"| **Resolution Timestamp** | `{resolved_at.isoformat()}` |",
             f"| **MTTR (Mean Time to Resolution)** | `{mttr_seconds}s` |",
-            f"| **Final Deployment Commit** | `{context.commit_hash or 'HEAD'}` |",
+            f"| **Final Deployment Commit** | `{context.commit_hash or 'N/A (Cluster Action)'}` |",
             "",
             "---",
             "",
@@ -248,7 +253,7 @@ class RunLorePostMortemGenerator:
             "",
             "## 7. Code Isolation & Deployment Patch (YYLO Worktree)",
             "",
-            f"**Git Commit Reference:** `{context.commit_hash or 'HEAD'}`  ",
+            f"**Git Commit Reference:** `{context.commit_hash or 'N/A (Direct Cluster Action)'}`  ",
             "",
             "### Unified Patch Diff",
             "```diff",

@@ -15,13 +15,14 @@ Lifecycle:
 from __future__ import annotations
 
 import asyncio
-import re
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
 import structlog
+
+from app.utils.validation import validate_incident_id
 
 logger = structlog.get_logger()
 
@@ -65,8 +66,8 @@ class GitWorktreeManager:
         """
         Creates and returns an active isolated worktree session.
         """
-        # Sanitize incident ID for path & branch safety
-        safe_id = re.sub(r"[^a-zA-Z0-9_-]", "", incident_id)[:32]
+        # Validate incident ID for path & branch safety
+        safe_id = validate_incident_id(incident_id)
         worktree_dir = self.worktree_base / f"fix-{safe_id}"
         branch_name = f"fix/{safe_id}"
 

@@ -59,3 +59,14 @@ async def test_worktree_blocks_path_traversal_escape() -> None:
         assert "Path traversal detected" in str(exc_info.value)
     finally:
         await session.cleanup()
+
+
+@pytest.mark.asyncio
+async def test_worktree_rejects_invalid_incident_id() -> None:
+    mgr = GitWorktreeManager()
+    with pytest.raises(ValueError, match="Invalid incident_id"):
+        await mgr.create_worktree(incident_id="../malicious_path")
+
+    with pytest.raises(ValueError, match="Invalid incident_id"):
+        await mgr.create_worktree(incident_id="")
+
