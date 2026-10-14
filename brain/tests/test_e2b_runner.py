@@ -7,6 +7,8 @@ Verifies:
 - Checksums and timestamps are computed accurately.
 """
 
+from typing import Any
+
 import pytest
 
 from app.sandbox.e2b_runner import (
@@ -54,7 +56,7 @@ async def test_runner_raises_security_violation_error() -> None:
 
 
 @pytest.mark.asyncio
-async def test_safe_script_executes_simulation_successfully() -> None:
+async def test_safe_script_unvalidated_without_api_key() -> None:
     runner = E2BMicroSandboxRunner()
     safe_script = """
     kubectl rollout status deployment/payment-gateway --timeout=60s
@@ -63,8 +65,32 @@ async def test_safe_script_executes_simulation_successfully() -> None:
 
     result = await runner.execute_simulation(safe_script, language="bash")
 
-    assert result.status == "pass"
-    assert result.exit_code == 0
+    # Step 1 requirement: with no key, return status "unvalidated", never "pass"
+    assert result.status == "unvalidated"
+    assert result.exit_code == 1
     assert result.checksum.startswith("sha256:")
     assert result.duration_ms >= 0
     assert result.finished_at >= result.started_at
+
+
+@pytest.mark.asyncio
+async def test_safe_script_executes_simulation_with_mock_factory() -> None:
+    class MockSandbox:
+        def __init__(self) -> None:
+            self.id = "mock-sandbox-custom"
+
+        async def run_code(self, script: str, language: str, timeout_ms: int) -> Any:
+            class ExecRes:
+                exit_code = 0
+                stdout = "Simulation verified."
+                stderr = ""
+            return ExecRes()
+
+    runner = E2BMicroSandboxRunner(custom_sandbox_factory=MockSandbox)
+    safe_script = "echo 'testing'"
+
+    result = await runner.execute_simulation(safe_script, language="bash")
+
+    assert result.status == "pass"
+    assert result.exit_code == 0
+    assert result.sandbox_id == "mock-sandbox-custom"

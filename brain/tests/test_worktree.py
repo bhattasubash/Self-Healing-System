@@ -10,6 +10,7 @@ Verifies:
 """
 
 from pathlib import Path
+
 import pytest
 
 from app.sandbox.worktree import GitWorktreeManager, WorktreeError

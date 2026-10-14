@@ -14,19 +14,21 @@ Provides the human-in-the-loop write-access gate:
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
 import hashlib
 import hmac
 import time
-from typing import Any
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING, Annotated, Any
 
+import structlog
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
 from pydantic import BaseModel, Field
-import structlog
 
 from app.config import Settings, get_settings
-from app.services.graph_store import TemporalGraphDiff
-from app.sandbox.e2b_runner import SandboxExecutionResult
+
+if TYPE_CHECKING:
+    from app.sandbox.e2b_runner import SandboxExecutionResult
+    from app.services.graph_store import TemporalGraphDiff
 
 router = APIRouter(prefix="/api/v1/approval", tags=["Approval Gate"])
 logger = structlog.get_logger()
@@ -46,7 +48,7 @@ class ApprovalDecisionPayload(BaseModel):
     decision: str = Field(description="'approved' | 'rejected'")
     decided_by: str = Field(description="Slack User ID or Email of human operator")
     decision_reason: str | None = None
-    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
 class ApprovalDecisionResponse(BaseModel):
@@ -90,7 +92,7 @@ def verify_slack_signature(
         return False
 
     # 2. Build canonical base string
-    sig_basestring = f"v0:{slack_timestamp}:".encode("utf-8") + request_body
+    sig_basestring = f"v0:{slack_timestamp}:".encode() + request_body
 
     # 3. Compute HMAC digest
     computed_digest = hmac.new(
@@ -142,7 +144,13 @@ def build_slack_approval_card(
             "fields": [
                 {"type": "mrkdwn", "text": f"*Incident ID:*\n`{incident_id}`"},
                 {"type": "mrkdwn", "text": f"*Severity & Tier:*\n{severity_badge}"},
-                {"type": "mrkdwn", "text": f"*Sandbox Validation:*\n{status_emoji} (Exit: {sandbox_result.exit_code})"},
+                {
+                    "type": "mrkdwn",
+                    "text": (
+                        f"*Sandbox Validation:*\n{status_emoji} "
+                        f"(Exit: {sandbox_result.exit_code})"
+                    ),
+                },
                 {"type": "mrkdwn", "text": f"*Execution Runtime:*\n{sandbox_result.duration_ms}ms"},
             ],
         },
@@ -154,7 +162,9 @@ def build_slack_approval_card(
         diff_lines = []
         for d in graph_diff.node_diffs[:5]:  # Show top 5 mutated entities
             if d.diff_type == "MUTATED":
-                diff_lines.append(f"• `[MUTATED]` {d.entity_id} (keys: {', '.join(d.modified_keys)})")
+                diff_lines.append(
+                    f"• `[MUTATED]` {d.entity_id} (keys: {', '.join(d.modified_keys)})"
+                )
             elif d.diff_type == "CREATED":
                 diff_lines.append(f"• `[CREATED]` {d.entity_id}")
             elif d.diff_type == "TERMINATED":
@@ -164,12 +174,19 @@ def build_slack_approval_card(
             "type": "section",
             "text": {
                 "type": "mrkdwn",
-                "text": f"*Bi-Temporal State Graph Diffs (Baseline ➔ Incident):*\n" + "\n".join(diff_lines),
+                "text": (
+                    "*Bi-Temporal State Graph Diffs (Baseline ➔ Incident):*\n"
+                    + "\n".join(diff_lines)
+                ),
             },
         })
 
     # Sandbox Logs Section
-    log_sample = sandbox_result.stdout.strip() or sandbox_result.stderr.strip() or "No output logged."
+    log_sample = (
+        sandbox_result.stdout.strip()
+        or sandbox_result.stderr.strip()
+        or "No output logged."
+    )
     truncated_logs = log_sample[:1000] + ("..." if len(log_sample) > 1000 else "")
 
     blocks.append({
@@ -235,9 +252,9 @@ def build_slack_approval_card(
 async def process_approval_decision(
     request: Request,
     payload: ApprovalDecisionPayload,
+    settings: Annotated[Settings, Depends(get_settings)],
     x_slack_signature: str | None = Header(None, alias="X-Slack-Signature"),
     x_slack_request_timestamp: str | None = Header(None, alias="X-Slack-Request-Timestamp"),
-    settings: Settings = Depends(get_settings),
 ) -> ApprovalDecisionResponse:
     """
     Validates human approval decision with HMAC authentication:
@@ -296,6 +313,6 @@ async def process_approval_decision(
         incident_id=payload.incident_id,
         decision=decision_norm,
         status="PROCESSED",
-        recorded_at=datetime.now(timezone.utc),
+        recorded_at=datetime.now(UTC),
         message=msg,
     )

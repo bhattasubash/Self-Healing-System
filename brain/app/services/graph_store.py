@@ -13,16 +13,14 @@ Uses explicit, async Neo4j transaction scopes:
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any, Final
 
-import neo4j
-from neo4j import AsyncDriver, AsyncGraphDatabase, AsyncManagedTransaction, AsyncTransaction
-from pydantic import BaseModel, Field
 import structlog
+from neo4j import AsyncDriver, AsyncGraphDatabase
+from pydantic import BaseModel, Field
 
-from app.config import Neo4jSettings, Settings, get_settings
+from app.config import Neo4jSettings, get_settings
 
 logger = structlog.get_logger()
 
@@ -136,10 +134,13 @@ class BiTemporalGraphStore:
         Insert an initial version of an infrastructure entity.
         Enforces valid_to = NULL (active state) and recorded_at = NOW.
         """
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         v_from = valid_from or now
 
-        clean_props = {k: v for k, v in properties.items() if not k.startswith("valid_") and k != "recorded_at"}
+        clean_props = {
+            k: v for k, v in properties.items()
+            if not k.startswith("valid_") and k != "recorded_at"
+        }
 
         cypher = f"""
         CREATE (n:{label}:InfrastructureEntity)
@@ -151,8 +152,10 @@ class BiTemporalGraphStore:
         RETURN n, labels(n) as node_labels
         """
 
-        async with self._driver.session(database=self._database) as session:
-            async with await session.begin_transaction() as tx:
+        async with (
+            self._driver.session(database=self._database) as session,
+            await session.begin_transaction() as tx,
+        ):
                 result = await tx.run(
                     cypher,
                     props=clean_props,
@@ -180,9 +183,12 @@ class BiTemporalGraphStore:
         1. Close the current active version by setting valid_to = valid_time_cutoff.
         2. Insert the new version node with valid_from = valid_time_cutoff, valid_to = NULL.
         """
-        cutoff = valid_time_cutoff or datetime.now(timezone.utc)
-        now = datetime.now(timezone.utc)
-        clean_props = {k: v for k, v in new_properties.items() if not k.startswith("valid_") and k != "recorded_at"}
+        cutoff = valid_time_cutoff or datetime.now(UTC)
+        now = datetime.now(UTC)
+        clean_props = {
+            k: v for k, v in new_properties.items()
+            if not k.startswith("valid_") and k != "recorded_at"
+        }
 
         cypher_close = f"""
         MATCH (n:{label} {{entity_id: $entity_id}})
@@ -202,8 +208,10 @@ class BiTemporalGraphStore:
         RETURN n, labels(n) as node_labels
         """
 
-        async with self._driver.session(database=self._database) as session:
-            async with await session.begin_transaction() as tx:
+        async with (
+            self._driver.session(database=self._database) as session,
+            await session.begin_transaction() as tx,
+        ):
                 # Step 1: Close active version
                 res_close = await tx.run(
                     cypher_close,
@@ -242,7 +250,7 @@ class BiTemporalGraphStore:
         valid_at: datetime | None = None,
     ) -> TemporalNode | None:
         """Look up the exact state of an entity at a given valid-time moment."""
-        target_time = valid_at or datetime.now(timezone.utc)
+        target_time = valid_at or datetime.now(UTC)
 
         cypher = """
         MATCH (n:InfrastructureEntity {entity_id: $entity_id})
@@ -252,8 +260,10 @@ class BiTemporalGraphStore:
         LIMIT 1
         """
 
-        async with self._driver.session(database=self._database) as session:
-            async with await session.begin_transaction() as tx:
+        async with (
+            self._driver.session(database=self._database) as session,
+            await session.begin_transaction() as tx,
+        ):
                 result = await tx.run(
                     cypher,
                     entity_id=entity_id,
@@ -277,7 +287,7 @@ class BiTemporalGraphStore:
         valid_from: datetime | None = None,
     ) -> TemporalRelationship:
         """Create a bi-temporal edge between two entities."""
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         v_from = valid_from or now
         props = properties or {}
 
@@ -294,8 +304,10 @@ class BiTemporalGraphStore:
         RETURN r, type(r) as rel_name
         """
 
-        async with self._driver.session(database=self._database) as session:
-            async with await session.begin_transaction() as tx:
+        async with (
+            self._driver.session(database=self._database) as session,
+            await session.begin_transaction() as tx,
+        ):
                 result = await tx.run(
                     cypher,
                     source_id=source_id,
@@ -327,7 +339,7 @@ class BiTemporalGraphStore:
         Extract the complete structural state topology valid at a specific timestamp.
         Only traverses nodes and edges active during the specified temporal moment.
         """
-        target_time = valid_at or datetime.now(timezone.utc)
+        target_time = valid_at or datetime.now(UTC)
         label_filter = f":{entity_type}" if entity_type else ""
 
         cypher_nodes = f"""
@@ -349,8 +361,10 @@ class BiTemporalGraphStore:
         RETURN src.entity_id as source_id, tgt.entity_id as target_id, r, type(r) as rel_type
         """
 
-        async with self._driver.session(database=self._database) as session:
-            async with await session.begin_transaction() as tx:
+        async with (
+            self._driver.session(database=self._database) as session,
+            await session.begin_transaction() as tx,
+        ):
                 # Query nodes
                 nodes_res = await tx.run(
                     cypher_nodes,
@@ -448,9 +462,13 @@ class BiTemporalGraphStore:
 
         rel_changes = []
         for src, tgt, rtype in r2_set - r1_set:
-            rel_changes.append({"action": "ADDED", "source_id": src, "target_id": tgt, "type": rtype})
+            rel_changes.append(
+                {"action": "ADDED", "source_id": src, "target_id": tgt, "type": rtype}
+            )
         for src, tgt, rtype in r1_set - r2_set:
-            rel_changes.append({"action": "REMOVED", "source_id": src, "target_id": tgt, "type": rtype})
+            rel_changes.append(
+                {"action": "REMOVED", "source_id": src, "target_id": tgt, "type": rtype}
+            )
 
         return TemporalGraphDiff(
             t1=t1,
@@ -464,7 +482,7 @@ class BiTemporalGraphStore:
     def _record_to_node(self, data: dict[str, Any], labels: list[str]) -> TemporalNode:
         v_from = self._parse_neo4j_dt(data.get("valid_from"))
         v_to = self._parse_neo4j_dt(data.get("valid_to")) if data.get("valid_to") else None
-        rec_at = self._parse_neo4j_dt(data.get("recorded_at")) or datetime.now(timezone.utc)
+        rec_at = self._parse_neo4j_dt(data.get("recorded_at")) or datetime.now(UTC)
 
         props = {
             k: v for k, v in data.items()
@@ -473,9 +491,9 @@ class BiTemporalGraphStore:
 
         return TemporalNode(
             entity_id=data.get("entity_id", "UNKNOWN"),
-            labels=[l for l in labels if l != "InfrastructureEntity"],
+            labels=[lbl for lbl in labels if lbl != "InfrastructureEntity"],
             properties=props,
-            valid_from=v_from or datetime.now(timezone.utc),
+            valid_from=v_from or datetime.now(UTC),
             valid_to=v_to,
             recorded_at=rec_at,
         )
@@ -485,7 +503,7 @@ class BiTemporalGraphStore:
     ) -> TemporalRelationship:
         v_from = self._parse_neo4j_dt(data.get("valid_from"))
         v_to = self._parse_neo4j_dt(data.get("valid_to")) if data.get("valid_to") else None
-        rec_at = self._parse_neo4j_dt(data.get("recorded_at")) or datetime.now(timezone.utc)
+        rec_at = self._parse_neo4j_dt(data.get("recorded_at")) or datetime.now(UTC)
 
         props = {
             k: v for k, v in data.items()
@@ -497,7 +515,7 @@ class BiTemporalGraphStore:
             target_id=target_id,
             type=rel_type,
             properties=props,
-            valid_from=v_from or datetime.now(timezone.utc),
+            valid_from=v_from or datetime.now(UTC),
             valid_to=v_to,
             recorded_at=rec_at,
         )
@@ -509,7 +527,8 @@ class BiTemporalGraphStore:
         if isinstance(val, datetime):
             return val
         if hasattr(val, "to_native"):
-            return val.to_native()
+            dt: Any = val.to_native()
+            return dt if isinstance(dt, datetime) else None
         try:
             return datetime.fromisoformat(str(val))
         except Exception:

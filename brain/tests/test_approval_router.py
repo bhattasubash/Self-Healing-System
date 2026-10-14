@@ -8,11 +8,11 @@ Verifies:
 - POST /api/v1/approval/decision endpoint processing with HMAC security.
 """
 
-from datetime import datetime, timezone
 import hashlib
 import hmac
-import json
 import time
+from datetime import UTC, datetime
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -30,10 +30,14 @@ def client() -> TestClient:
     return TestClient(app)
 
 
-def _compute_slack_headers(body: bytes, secret: str, timestamp: int | None = None) -> dict[str, str]:
+def _compute_slack_headers(
+    body: bytes,
+    signing_key: str,
+    timestamp: int | None = None,
+) -> dict[str, str]:
     ts = str(timestamp or int(time.time()))
-    basestring = f"v0:{ts}:".encode("utf-8") + body
-    sig = "v0=" + hmac.new(secret.encode("utf-8"), basestring, hashlib.sha256).hexdigest()
+    basestring = f"v0:{ts}:".encode() + body
+    sig = "v0=" + hmac.new(signing_key.encode("utf-8"), basestring, hashlib.sha256).hexdigest()
     return {
         "X-Slack-Request-Timestamp": ts,
         "X-Slack-Signature": sig,
@@ -41,32 +45,32 @@ def _compute_slack_headers(body: bytes, secret: str, timestamp: int | None = Non
 
 
 def test_verify_slack_signature_valid() -> None:
-    secret = "test_signing_secret_12345"
+    dummy_signing_key = "test_signing_key_12345"
     body = b'{"action": "approve"}'
     ts = int(time.time())
 
-    headers = _compute_slack_headers(body, secret, ts)
+    headers = _compute_slack_headers(body, dummy_signing_key, ts)
     is_valid = verify_slack_signature(
         request_body=body,
         slack_timestamp=headers["X-Slack-Request-Timestamp"],
         slack_signature=headers["X-Slack-Signature"],
-        signing_secret=secret,
+        signing_secret=dummy_signing_key,
     )
     assert is_valid is True
 
 
 def test_verify_slack_signature_rejects_replay_attack() -> None:
-    secret = "test_signing_secret_12345"
+    dummy_signing_key = "test_signing_key_12345"
     body = b'{"action": "approve"}'
     # Timestamp from 10 minutes ago (> 300s)
     old_ts = int(time.time()) - 600
 
-    headers = _compute_slack_headers(body, secret, old_ts)
+    headers = _compute_slack_headers(body, dummy_signing_key, old_ts)
     is_valid = verify_slack_signature(
         request_body=body,
         slack_timestamp=headers["X-Slack-Request-Timestamp"],
         slack_signature=headers["X-Slack-Signature"],
-        signing_secret=secret,
+        signing_secret=dummy_signing_key,
     )
     assert is_valid is False
 
@@ -79,15 +83,15 @@ def test_build_slack_approval_card_structure() -> None:
         stdout="Pod rollout completed successfully.",
         stderr="",
         duration_ms=450,
-        started_at=datetime.now(timezone.utc),
-        finished_at=datetime.now(timezone.utc),
+        started_at=datetime.now(UTC),
+        finished_at=datetime.now(UTC),
         resource_usage=ResourceUsage(cpu_ms=450, memory_peak_mb=64),
         checksum="sha256:abcd1234abcd1234",
     )
 
     graph_diff = TemporalGraphDiff(
-        t1=datetime.now(timezone.utc),
-        t2=datetime.now(timezone.utc),
+        t1=datetime.now(UTC),
+        t2=datetime.now(UTC),
         node_diffs=[
             TemporalEntityDiff(
                 entity_id="MASKED_SVC_payment",

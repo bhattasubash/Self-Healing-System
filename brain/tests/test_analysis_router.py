@@ -8,18 +8,14 @@ Verifies:
 - FSM transition history is recorded and returned in response.
 """
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
+
 import pytest
 from fastapi.testclient import TestClient
 
 from app.main import app
 from app.schemas.telemetry import (
-    DataPoint,
-    FilterMethod,
-    FilterStats,
     Severity,
-    TelemetryEvent,
-    TelemetrySource,
 )
 
 
@@ -38,7 +34,7 @@ def _build_masked_event(
         "metric_name": metric_name,
         "data_points": [
             {
-                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "timestamp": datetime.now(UTC).isoformat(),
                 "value": 0.95,
             }
         ],
@@ -47,7 +43,7 @@ def _build_masked_event(
             "namespace": "MASKED_NS_12345678",
         },
         "severity": severity.value,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": datetime.now(UTC).isoformat(),
         "session_id": "b0000000-0000-0000-0000-000000000002",
         "masking_applied": True,
         "filter_stats": {
@@ -78,7 +74,10 @@ def test_analyze_rejects_unmasked_telemetry(client: TestClient) -> None:
 
 def test_analyze_processes_valid_telemetry(client: TestClient) -> None:
     event1 = _build_masked_event(metric_name="container_cpu_usage", severity=Severity.CRITICAL)
-    event2 = _build_masked_event(metric_name="container_memory_working_set_bytes", severity=Severity.WARNING)
+    event2 = _build_masked_event(
+        metric_name="container_memory_working_set_bytes",
+        severity=Severity.WARNING,
+    )
 
     response = client.post(
         "/api/v1/analyze",

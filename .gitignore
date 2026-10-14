@@ -16,6 +16,8 @@ build/
 .ruff_cache/
 .pytest_cache/
 .coverage
+coverage.xml
+*.xml
 htmlcov/
 .venv/
 venv/
@@ -48,3 +50,7 @@ infra/neo4j/logs/
 # ── Logs ──
 *.log
 logs/
+
+# ── Local PRD docs ──
+*.docx
+PRD_*.md

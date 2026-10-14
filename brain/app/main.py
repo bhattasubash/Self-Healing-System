@@ -13,12 +13,15 @@ from __future__ import annotations
 
 import sys
 from contextlib import asynccontextmanager
-from typing import AsyncGenerator
+from typing import TYPE_CHECKING
 
-from fastapi import FastAPI, status
-from fastapi.middleware.cors import CORSMiddleware
 import structlog
 import uvicorn
+from fastapi import FastAPI, status
+from fastapi.middleware.cors import CORSMiddleware
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncGenerator
 
 from app.config import Settings, get_settings
 from app.routers.analysis import router as analysis_router
@@ -76,7 +79,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         title="Self-Healing AI SRE Brain",
         description=(
             "Analytical reasoning brain for the Privacy-First Simulation-Gated AI SRE Agent. "
-            "Enforces zero data centralization, regex pre-filtering, and deterministic FSM pathways."
+            "Enforces zero data centralization, regex pre-filtering, and "
+            "deterministic FSM pathways."
         ),
         version="0.1.0",
         lifespan=lifespan,

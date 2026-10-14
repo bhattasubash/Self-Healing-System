@@ -16,9 +16,9 @@ SECURITY INVARIANTS:
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
 import hashlib
 import re
+from datetime import UTC, datetime
 from typing import Any, Final
 
 import structlog
@@ -48,11 +48,17 @@ DANGEROUS_PATTERNS: Final[list[tuple[str, re.Pattern[str]]]] = [
     ),
     (
         "RAW_DEVICE_OVERWRITE",
-        re.compile(r"\bdd\s+if=.*(?:of=/dev/(?:sd[a-z]|nvme|vd[a-z]|hd[a-z]|zero|null))", re.IGNORECASE),
+        re.compile(
+            r"\bdd\s+if=.*(?:of=/dev/(?:sd[a-z]|nvme|vd[a-z]|hd[a-z]|zero|null))",
+            re.IGNORECASE,
+        ),
     ),
     (
         "KUBERNETES_NAMESPACE_PURGE",
-        re.compile(r"\bkubectl\s+delete\s+(?:namespaces?|ns)\s+(?:--all|[a-zA-Z0-9_-]+)", re.IGNORECASE),
+        re.compile(
+            r"\bkubectl\s+delete\s+(?:namespaces?|ns)\s+(?:--all|[a-zA-Z0-9_-]+)",
+            re.IGNORECASE,
+        ),
     ),
     (
         "KUBERNETES_ALL_RESOURCES_PURGE",
@@ -76,7 +82,10 @@ DANGEROUS_PATTERNS: Final[list[tuple[str, re.Pattern[str]]]] = [
     ),
     (
         "KERNEL_RELOAD_FORCE_REBOOT",
-        re.compile(r"\b(?:reboot\s+-f|init\s+0|halt\s+-f|poweroff\s+-f|shutdown\s+-r\s+now)\b", re.IGNORECASE),
+        re.compile(
+            r"\b(?:reboot\s+-f|init\s+0|halt\s+-f|poweroff\s+-f|shutdown\s+-r\s+now)\b",
+            re.IGNORECASE,
+        ),
     ),
 ]
 
@@ -184,7 +193,7 @@ class E2BMicroSandboxRunner:
         # Step 2: Compute Checksum
         checksum = f"sha256:{hashlib.sha256(script_content.encode('utf-8')).hexdigest()}"
         effective_timeout = timeout_ms or self._settings.sandbox_timeout_ms
-        started_at = datetime.now(timezone.utc)
+        started_at = datetime.now(UTC)
 
         # Step 3: Execute in Sandbox with Guaranteed Teardown
         sandbox = None
@@ -211,12 +220,18 @@ class E2BMicroSandboxRunner:
                 stderr_buf.append(getattr(exec_result, "stderr", ""))
             elif api_key:
                 # Real E2B Cloud Sandbox
+                import shlex
+
                 from e2b import Sandbox
 
-                sandbox = Sandbox(api_key=api_key)
-                sandbox_id = sandbox.sandbox_id
+                sandbox = Sandbox.create(api_key=api_key)
+                sandbox_id = getattr(sandbox, "sandbox_id", getattr(sandbox, "id", "sandbox-cloud"))
 
-                cmd = f"bash -c {repr(script_content)}" if language == "bash" else f"python3 -c {repr(script_content)}"
+                cmd = (
+                    f"bash -c {shlex.quote(script_content)}"
+                    if language == "bash"
+                    else f"python3 -c {shlex.quote(script_content)}"
+                )
                 process = sandbox.commands.run(
                     cmd,
                     timeout=effective_timeout / 1000.0,
@@ -224,17 +239,20 @@ class E2BMicroSandboxRunner:
                 exit_code = process.exit_code
                 stdout_buf.append(process.stdout)
                 stderr_buf.append(process.stderr)
+                run_status = "pass" if exit_code == 0 else "fail"
             else:
-                # Local Dry-Run Simulation (Zero external egress / test environment)
-                self._log.info(
-                    "e2b_dry_run_simulation",
-                    reason="No E2B_API_KEY configured; running static sandbox emulation",
+                # No E2B API Key: fail closed / unvalidated (D-16, Step 1)
+                self._log.warning(
+                    "e2b_api_key_missing",
+                    reason="No E2B_API_KEY configured; returning unvalidated status",
                 )
-                sandbox_id = f"mock-sandbox-{hashlib.md5(script_content.encode()).hexdigest()[:8]}"
-                stdout_buf.append(f"[SIMULATION VALIDATION PASS] Syntax verified for {language} script.")
-                exit_code = 0
-
-            run_status = "pass" if exit_code == 0 else "fail"
+                script_hash = hashlib.sha256(script_content.encode()).hexdigest()[:8]
+                sandbox_id = f"unvalidated-{script_hash}"
+                stdout_buf.append(
+                    "[STATIC CHECK ONLY] No E2B_API_KEY configured; script unvalidated."
+                )
+                exit_code = 1
+                run_status = "unvalidated"
 
         except TimeoutError:
             self._log.error("sandbox_execution_timeout", timeout_ms=effective_timeout)
@@ -262,7 +280,7 @@ class E2BMicroSandboxRunner:
                         error=str(cleanup_err),
                     )
 
-        finished_at = datetime.now(timezone.utc)
+        finished_at = datetime.now(UTC)
         duration_ms = int((finished_at - started_at).total_seconds() * 1000)
 
         return SandboxExecutionResult(

@@ -15,10 +15,10 @@ Lifecycle:
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
-from pathlib import Path
 import re
 import shutil
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Final
 
 import structlog
@@ -200,7 +200,7 @@ class GitWorktreeSession:
             raise WorktreeError("Worktree session is not active")
 
         await self._run_command(["git", "add", "-A"], cwd=self.worktree_dir)
-        stdout, stderr, code = await self._run_command(
+        _, stderr, code = await self._run_command(
             ["git", "commit", "-m", message],
             cwd=self.worktree_dir,
         )

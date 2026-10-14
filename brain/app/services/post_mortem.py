@@ -8,14 +8,15 @@ authoritative, markdown post-mortem report (.incidents/incident-<id>.md).
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Final
+from typing import TYPE_CHECKING, Final
 
 import structlog
 
-from app.schemas.telemetry import TransitionRecord
-from app.services.state_machine import IncidentContext
+if TYPE_CHECKING:
+    from app.schemas.telemetry import TransitionRecord
+    from app.services.state_machine import IncidentContext
 
 logger = structlog.get_logger()
 
@@ -43,7 +44,7 @@ class RunLorePostMortemGenerator:
         self.output_dir.mkdir(parents=True, exist_ok=True)
         incident_file = self.output_dir / f"incident-{context.incident_id}.md"
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         first_transition_time = transitions[0].timestamp if transitions else now
         last_transition_time = transitions[-1].timestamp if transitions else now
         mttr_seconds = int((last_transition_time - first_transition_time).total_seconds())
@@ -76,7 +77,11 @@ class RunLorePostMortemGenerator:
         resolved_at: datetime,
         mttr_seconds: int,
     ) -> str:
-        services_str = ", ".join(context.target_services) if context.target_services else "payment-gateway"
+        services_str = (
+            ", ".join(context.target_services)
+            if context.target_services
+            else "payment-gateway"
+        )
         severity_upper = context.severity.upper()
         tier_upper = context.service_tier.upper()
 
@@ -84,7 +89,10 @@ class RunLorePostMortemGenerator:
             f"# Incident Post-Mortem Report: `{context.incident_id}`",
             "",
             "> **Generated automatically by the RunLore Documentation Engine**  ",
-            f"> **Status:** RESOLVED & VERIFIED | **Tier:** {tier_upper} | **Severity:** {severity_upper}",
+            (
+                f"> **Status:** RESOLVED & VERIFIED | **Tier:** {tier_upper} | "
+                f"**Severity:** {severity_upper}"
+            ),
             "",
             "---",
             "",
@@ -105,9 +113,20 @@ class RunLorePostMortemGenerator:
             "",
             "## 2. Executive Summary",
             "",
-            f"**Root Cause Summary:**  \n{context.root_cause_summary or 'Automated telemetry triage identified threshold anomaly.'}",
+            (
+                "**Root Cause Summary:**  \n"
+                + (
+                    context.root_cause_summary
+                    or "Automated telemetry triage identified threshold anomaly."
+                )
+            ),
             "",
-            "**Resolution Action:**  \nRemediation patch was generated, statically scanned against the security barrier, simulated in an isolated E2B micro-sandbox, validated via human Slack approval, and deployed through an isolated git worktree.",
+            (
+                "**Resolution Action:**  \n"
+                "Remediation patch was generated, statically scanned against the security barrier, "
+                "simulated in an isolated E2B micro-sandbox, validated via human Slack approval, "
+                "and deployed through an isolated git worktree."
+            ),
             "",
             "---",
             "",
@@ -141,11 +160,15 @@ class RunLorePostMortemGenerator:
             for d in context.graph_diff.node_diffs:
                 diff_type = getattr(d, "diff_type", "MUTATED")
                 keys = ", ".join(getattr(d, "modified_keys", [])) or "-"
-                lines.append(f"| `{d.entity_id}` | `{diff_type}` | {keys} | Inspected via BiTemporalGraphStore |")
+                lines.append(
+                    f"| `{d.entity_id}` | `{diff_type}` | {keys} | "
+                    f"Inspected via BiTemporalGraphStore |"
+                )
             lines.append("")
         else:
             lines.extend([
-                "Topology steady state verified. No unauthorized configuration drift detected prior to incident window.",
+                "Topology steady state verified. "
+                "No unauthorized configuration drift detected prior to incident window.",
                 "",
             ])
 
@@ -156,8 +179,14 @@ class RunLorePostMortemGenerator:
             "",
             "| Metric | Value |",
             "| :--- | :--- |",
-            f"| **Raw Telemetry Lines** | `{context.raw_line_count or len(context.filtered_lines) * 10}` |",
-            f"| **Filtered Actionable Lines** | `{context.filtered_line_count or len(context.filtered_lines)}` |",
+            (
+                f"| **Raw Telemetry Lines** | "
+                f"`{context.raw_line_count or len(context.filtered_lines) * 10}` |"
+            ),
+            (
+                f"| **Filtered Actionable Lines** | "
+                f"`{context.filtered_line_count or len(context.filtered_lines)}` |"
+            ),
             f"| **Context Compression Ratio** | `{context.prefilter_compression_ratio:.2%}` |",
             f"| **Noise Reduction Rate** | `{(1.0 - context.prefilter_compression_ratio):.2%}` |",
             "",
@@ -234,8 +263,18 @@ class RunLorePostMortemGenerator:
             "| :--- | :--- |",
             f"| **Approval Decision** | `{context.approval_decision or 'approved'}` |",
             f"| **Decided By (Operator)** | `{context.decided_by or 'automated_policy_lead'}` |",
-            f"| **Decided At (Timestamp)** | `{context.decided_at.isoformat() if context.decided_at else resolved_at.isoformat()}` |",
-            f"| **Operator Notes** | {context.decision_reason or 'Validated fix simulation passes without regression.'} |",
+            (
+                f"| **Decided At (Timestamp)** | "
+                f"`{(context.decided_at or resolved_at).isoformat()}` |"
+            ),
+            (
+                "| **Operator Notes** | "
+                + (
+                    context.decision_reason
+                    or "Validated fix simulation passes without regression."
+                )
+                + " |"
+            ),
             "| **HMAC Authentication** | `VERIFIED (constant-time digest match)` |",
             "",
             "---",

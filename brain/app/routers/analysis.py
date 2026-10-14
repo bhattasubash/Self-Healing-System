@@ -9,11 +9,10 @@ Endpoint:
 
 from __future__ import annotations
 
-import json
-from typing import Any
+from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, status
 import structlog
+from fastapi import APIRouter, Depends, HTTPException, status
 
 from app.config import Settings, get_settings
 from app.schemas.telemetry import (
@@ -40,7 +39,7 @@ logger = structlog.get_logger()
 )
 async def analyze_telemetry(
     request: AnalysisRequest,
-    settings: Settings = Depends(get_settings),
+    settings: Annotated[Settings, Depends(get_settings)],
 ) -> AnalysisResponse:
     """
     Ingests masked telemetry events and drives the incident through deterministic FSM states:
@@ -91,7 +90,10 @@ async def analyze_telemetry(
         # Flatten telemetry into lines for high-throughput regex scrubbing
         raw_trace_lines: list[str] = []
         for event in request.events:
-            header = f"[{event.timestamp.isoformat()}] [{event.severity.upper()}] metric={event.metric_name}"
+            header = (
+                f"[{event.timestamp.isoformat()}] [{event.severity.upper()}] "
+                f"metric={event.metric_name}"
+            )
             raw_trace_lines.append(header)
             for k, v in event.labels.items():
                 raw_trace_lines.append(f"  label: {k}={v}")
@@ -135,9 +137,11 @@ async def analyze_telemetry(
         )
 
         analysis_summary_text = (
-            f"Analyzed {len(request.events)} telemetry event(s) across metrics: {', '.join(metrics_observed)}. "
+            f"Analyzed {len(request.events)} telemetry event(s) across metrics: "
+            f"{', '.join(metrics_observed)}. "
             f"Pre-filter achieved {filter_result.stats.compression_ratio:.2%} compression ratio. "
-            f"Identified {len(critical_lines)} critical line(s). Max anomaly score: {highest_anomaly:.2f}."
+            f"Identified {len(critical_lines)} critical line(s). "
+            f"Max anomaly score: {highest_anomaly:.2f}."
         )
 
         context.analysis_findings = {

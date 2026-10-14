@@ -201,7 +201,7 @@ class TracePreFilter:
         significant = self._prioritize(significant)
 
         # Stage 5: Enforce token budget
-        significant, was_truncated = self._enforce_budget(significant)
+        significant, _ = self._enforce_budget(significant)
 
         # Collect results
         filtered_lines = [p.raw for p in significant]

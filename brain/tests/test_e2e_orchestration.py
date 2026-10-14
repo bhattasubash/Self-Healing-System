@@ -5,13 +5,14 @@ Verifies the complete incident lifecycle from telemetry triage to post-mortem:
   INGEST ──► FILTER ──► ANALYZE ──► SANDBOX ──► APPROVE ──► DEPLOY ──► COMPLETED
 """
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock
+
 import pytest
 
 from app.sandbox.e2b_runner import E2BMicroSandboxRunner, ResourceUsage, SandboxExecutionResult
-from app.sandbox.worktree import GitWorktreeManager
 from app.schemas.telemetry import (
     DataPoint,
     FilterMethod,
@@ -35,8 +36,8 @@ def _build_test_event(
         source=TelemetrySource.PROMETHEUS,
         metric_name=metric,
         data_points=[
-            DataPoint(timestamp=datetime.now(timezone.utc), value=0.99),
-            DataPoint(timestamp=datetime.now(timezone.utc), value=0.98),
+            DataPoint(timestamp=datetime.now(UTC), value=0.99),
+            DataPoint(timestamp=datetime.now(UTC), value=0.98),
         ],
         labels={
             "app": "payment-gateway",
@@ -44,7 +45,7 @@ def _build_test_event(
             "namespace": "MASKED_NS_payments",
         },
         severity=severity,
-        timestamp=datetime.now(timezone.utc),
+        timestamp=datetime.now(UTC),
         masking_applied=masking,
         filter_stats=FilterStats(
             raw_line_count=20,
@@ -61,8 +62,8 @@ async def test_e2e_successful_triage_to_resolution_and_post_mortem(tmp_path: Pat
     # 1. Setup Mocked Graph Store
     mock_graph_store = MagicMock(spec=BiTemporalGraphStore)
     mock_graph_diff = TemporalGraphDiff(
-        t1=datetime.now(timezone.utc),
-        t2=datetime.now(timezone.utc),
+        t1=datetime.now(UTC),
+        t2=datetime.now(UTC),
         node_diffs=[
             TemporalEntityDiff(
                 entity_id="MASKED_SVC_payment_gateway",
@@ -83,8 +84,8 @@ async def test_e2e_successful_triage_to_resolution_and_post_mortem(tmp_path: Pat
         stdout="Rollout verification succeeded. Pods running.",
         stderr="",
         duration_ms=520,
-        started_at=datetime.now(timezone.utc),
-        finished_at=datetime.now(timezone.utc),
+        started_at=datetime.now(UTC),
+        finished_at=datetime.now(UTC),
         resource_usage=ResourceUsage(cpu_ms=520, memory_peak_mb=128),
         checksum="sha256:e2etest1234567890",
     )
@@ -145,8 +146,23 @@ async def test_e2e_successful_triage_to_resolution_and_post_mortem(tmp_path: Pat
 
 @pytest.mark.asyncio
 async def test_e2e_rejection_halts_deployment(tmp_path: Path) -> None:
+    mock_sandbox_runner = E2BMicroSandboxRunner()
+    fake_sbx_result = SandboxExecutionResult(
+        sandbox_id="sbx-e2e-test",
+        status="pass",
+        exit_code=0,
+        stdout="Syntax verified.",
+        stderr="",
+        duration_ms=200,
+        started_at=datetime.now(UTC),
+        finished_at=datetime.now(UTC),
+        checksum="sha256:testchecksum12345678",
+    )
+    mock_sandbox_runner.execute_simulation = AsyncMock(return_value=fake_sbx_result)
+
     coordinator = SREOrchestrationCoordinator(
-        post_mortem_gen=RunLorePostMortemGenerator(output_dir=tmp_path / ".incidents")
+        sandbox_runner=mock_sandbox_runner,
+        post_mortem_gen=RunLorePostMortemGenerator(output_dir=tmp_path / ".incidents"),
     )
     events = [_build_test_event()]
 

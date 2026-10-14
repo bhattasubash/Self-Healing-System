@@ -7,15 +7,14 @@ Tests verify:
 - Temporal snapshot diffing logic (CREATED, MUTATED, TERMINATED entities).
 """
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock
+
 import pytest
 
 from app.services.graph_store import (
     BiTemporalGraphStore,
-    TemporalEntityDiff,
     TemporalNode,
-    TemporalRelationship,
     TemporalSnapshot,
 )
 
@@ -32,14 +31,14 @@ def _make_dummy_node(
         properties=props,
         valid_from=valid_from,
         valid_to=valid_to,
-        recorded_at=datetime.now(timezone.utc),
+        recorded_at=datetime.now(UTC),
     )
 
 
 @pytest.mark.asyncio
 async def test_diff_snapshots_detects_created_mutated_and_terminated() -> None:
-    t1 = datetime(2026, 10, 1, 0, 0, 0, tzinfo=timezone.utc)
-    t2 = datetime(2026, 10, 1, 1, 0, 0, tzinfo=timezone.utc)
+    t1 = datetime(2026, 10, 1, 0, 0, 0, tzinfo=UTC)
+    t2 = datetime(2026, 10, 1, 1, 0, 0, tzinfo=UTC)
 
     # In t1:
     # - node_stable exists

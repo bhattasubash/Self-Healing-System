@@ -15,27 +15,28 @@ Integrates:
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
-from pathlib import Path
-from typing import Any
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 
 import structlog
 
 from app.config import Settings, get_settings
 from app.routers.approval import build_slack_approval_card
-from app.sandbox.e2b_runner import E2BMicroSandboxRunner, SandboxExecutionResult
+from app.sandbox.e2b_runner import E2BMicroSandboxRunner
 from app.sandbox.worktree import GitWorktreeManager, GitWorktreeSession
 from app.schemas.telemetry import (
     FSMStateName,
     Severity,
     TelemetryEvent,
 )
-from app.services.graph_store import BiTemporalGraphStore, TemporalGraphDiff
+
+if TYPE_CHECKING:
+    from app.services.graph_store import BiTemporalGraphStore, TemporalGraphDiff
+
 from app.services.post_mortem import RunLorePostMortemGenerator
 from app.services.pre_filter import TracePreFilter
 from app.services.state_machine import (
     IncidentContext,
-    InvalidStateTransitionError,
     SREStateMachine,
 )
 
@@ -86,7 +87,10 @@ class SREOrchestrationCoordinator:
             fsm.fail("Data perimeter violation: unmasked telemetry received.")
             raise ValueError(f"Found {len(unmasked)} unmasked telemetry events")
 
-        target_services = sorted({e.labels.get("app") or e.labels.get("service") or e.metric_name for e in events})
+        target_services = sorted({
+            e.labels.get("app") or e.labels.get("service") or e.metric_name
+            for e in events
+        })
         context.target_services = [s for s in target_services if s]
         context.severity = max((e.severity.value for e in events), default=Severity.CRITICAL.value)
 
@@ -112,12 +116,12 @@ class SREOrchestrationCoordinator:
         )
 
         # Extract graph diff if graph store is available
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         graph_diff: TemporalGraphDiff | None = None
         if self.graph_store:
             try:
                 # Compare baseline state from 10 minutes prior with incident onset
-                t_baseline = datetime.fromtimestamp(now.timestamp() - 600, tz=timezone.utc)
+                t_baseline = datetime.fromtimestamp(now.timestamp() - 600, tz=UTC)
                 graph_diff = await self.graph_store.diff_snapshots(t1=t_baseline, t2=now)
                 context.graph_diff = graph_diff
             except Exception as graph_err:
@@ -125,7 +129,8 @@ class SREOrchestrationCoordinator:
 
         context.root_cause_summary = (
             f"Observed critical metric spike across {len(context.target_services)} service(s). "
-            f"Pre-filter isolated {context.filtered_line_count} error frames from {context.raw_line_count} lines "
+            f"Pre-filter isolated {context.filtered_line_count} error frames "
+            f"from {context.raw_line_count} lines "
             f"({filter_result.stats.compression_ratio:.2%} compression ratio)."
         )
 
@@ -160,7 +165,9 @@ class SREOrchestrationCoordinator:
             context.worktree_diff = await worktree_session.get_diff()
         except Exception as wt_err:
             self._log.warning("worktree_isolation_fallback", error=str(wt_err))
-            context.worktree_diff = f"# Remediation script staged: {target_svc}\n+ {fix_script_code}"
+            context.worktree_diff = (
+                f"# Remediation script staged: {target_svc}\n+ {fix_script_code}"
+            )
         finally:
             if worktree_session:
                 await worktree_session.cleanup()
@@ -221,7 +228,7 @@ class SREOrchestrationCoordinator:
 
         context.approval_decision = decision.lower().strip()
         context.decided_by = decided_by
-        context.decided_at = datetime.now(timezone.utc)
+        context.decided_at = datetime.now(UTC)
         context.decision_reason = reason
 
         if context.approval_decision == "approved":
@@ -233,11 +240,11 @@ class SREOrchestrationCoordinator:
             )
 
             # Record deployment commit reference
-            context.commit_hash = f"git-rev-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}"
+            context.commit_hash = f"git-rev-{datetime.now(UTC).strftime('%Y%m%d%H%M%S')}"
             context.deployment_result = {
                 "status": "deployed",
                 "commit": context.commit_hash,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "timestamp": datetime.now(UTC).isoformat(),
             }
 
             # ── 7. COMPLETED & RUNLORE POST-MORTEM ──
@@ -260,8 +267,10 @@ class SREOrchestrationCoordinator:
             )
 
         else:
-            # Rejection pathway
-            fsm.fail(reason=f"Remediation rejected by human operator {decided_by}: {reason or 'No reason provided'}")
+            reason_text = reason or "No reason provided"
+            fsm.fail(
+                reason=f"Remediation rejected by human operator {decided_by}: {reason_text}"
+            )
             self._log.warning(
                 "incident_remediation_rejected",
                 incident_id=context.incident_id,
@@ -274,7 +283,9 @@ class SREOrchestrationCoordinator:
         """Flattens structured telemetry events into lines for regex pre-filtering."""
         lines: list[str] = []
         for ev in events:
-            lines.append(f"[{ev.timestamp.isoformat()}] [{ev.severity.upper()}] metric={ev.metric_name}")
+            lines.append(
+                f"[{ev.timestamp.isoformat()}] [{ev.severity.upper()}] metric={ev.metric_name}"
+            )
             for k, v in ev.labels.items():
                 lines.append(f"  label: {k}={v}")
             for pt in ev.data_points[:5]:

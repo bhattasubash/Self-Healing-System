@@ -8,7 +8,8 @@ Verifies:
 - Rejection of illegal transitions.
 """
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
+
 import pytest
 
 from app.schemas.telemetry import (
@@ -33,13 +34,13 @@ def _make_sample_event() -> TelemetryEvent:
         metric_name="node_cpu_utilization_ratio",
         data_points=[
             DataPoint(
-                timestamp=datetime.now(timezone.utc),
+                timestamp=datetime.now(UTC),
                 value=0.98,
             )
         ],
         labels={"host": "MASKED_HOST_1234"},
         severity=Severity.CRITICAL,
-        timestamp=datetime.now(timezone.utc),
+        timestamp=datetime.now(UTC),
         masking_applied=True,
         filter_stats=FilterStats(
             raw_line_count=10,

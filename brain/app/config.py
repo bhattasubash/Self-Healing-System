@@ -7,8 +7,6 @@ Secrets are NEVER logged, printed, or included in API responses.
 
 from __future__ import annotations
 
-from typing import Annotated
-
 from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -88,13 +86,13 @@ class PreFilterSettings(BaseSettings):
 
     model_config = SettingsConfigDict(env_prefix="PREFILTER_", populate_by_name=True)
 
-    context_budget_max_tokens: Annotated[int, Field(
+    context_budget_max_tokens: int = Field(
         default=32000,
         ge=1000,
         description="Hard ceiling on tokens forwarded to the LLM reasoning layer.",
         alias="CONTEXT_BUDGET_MAX_TOKENS",
-    )]
-    compression_target: Annotated[float, Field(
+    )
+    compression_target: float = Field(
         default=0.05,
         ge=0.0,
         le=1.0,
@@ -102,7 +100,7 @@ class PreFilterSettings(BaseSettings):
             "Target compression ratio (filtered/raw). "
             "Values below 0.05 indicate aggressive filtering."
         ),
-    )]
+    )
 
 
 class SlackSettings(BaseSettings):
@@ -227,7 +225,7 @@ def get_settings() -> Settings:
         async def health(settings: Settings = Depends(get_settings)):
             ...
     """
-    global _settings  # noqa: PLW0603
+    global _settings
     if _settings is None:
         _settings = Settings()
     return _settings
@@ -235,5 +233,5 @@ def get_settings() -> Settings:
 
 def reset_settings() -> None:
     """Reset the settings singleton. Used in tests to inject overrides."""
-    global _settings  # noqa: PLW0603
+    global _settings
     _settings = None

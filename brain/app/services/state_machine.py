@@ -14,9 +14,11 @@ State Lifecycle:
 from __future__ import annotations
 
 import uuid
-from collections.abc import Callable
-from datetime import datetime, timezone
-from typing import Any, Final
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING, Any, Final
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 import structlog
 
@@ -165,7 +167,7 @@ class SREStateMachine:
 
         from_state = self._current_state
         self._current_state = target_state
-        record = self._record_transition(from_state, target_state, reason, metadata or {})
+        self._record_transition(from_state, target_state, reason, metadata or {})
 
         self._log.info(
             "state_transition_committed",
@@ -242,13 +244,15 @@ class SREStateMachine:
                     f"'{self.context.sandbox_result.get('status')}'. Human approval gate blocked.",
                 )
 
-        elif target_state == FSMStateName.DEPLOY:
-            if self.context.approval_decision != "approved":
-                raise InvalidStateTransitionError(
-                    self._current_state,
-                    target_state,
-                    "Write gate violation: Deployment attempted without verified human approval.",
-                )
+        elif (
+            target_state == FSMStateName.DEPLOY
+            and self.context.approval_decision != "approved"
+        ):
+            raise InvalidStateTransitionError(
+                self._current_state,
+                target_state,
+                "Write gate violation: Deployment attempted without verified human approval.",
+            )
 
     def _record_transition(
         self,
@@ -260,7 +264,7 @@ class SREStateMachine:
         record = TransitionRecord(
             from_state=from_state,
             to_state=to_state,
-            timestamp=datetime.now(timezone.utc),
+            timestamp=datetime.now(UTC),
             reason=reason,
             metadata=metadata or {},
         )
