@@ -21,9 +21,6 @@ dependencies = [
     "pydantic>=2.11.0",
     "pydantic-settings>=2.8.0",
 
-    # ── Graph Database ──
-    "neo4j>=5.28.0",
-
     # ── Sandbox Execution ──
     "e2b==2.55.1",
 
@@ -89,7 +86,6 @@ testpaths = ["tests"]
 asyncio_mode = "auto"
 filterwarnings = [
     "error",
-    "ignore::DeprecationWarning:neo4j.*",
 ]
 
 # ── Mypy Configuration ──
@@ -104,7 +100,6 @@ check_untyped_defs = true
 
 [[tool.mypy.overrides]]
 module = [
-    "neo4j.*",
     "e2b.*",
 ]
 ignore_missing_imports = true

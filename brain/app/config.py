@@ -11,26 +11,20 @@ from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
-class Neo4jSettings(BaseSettings):
-    """Neo4j bi-temporal graph database connection settings."""
+class TemporalStoreSettings(BaseSettings):
+    """SQLite bi-temporal change timeline and state store settings (PRD F-04)."""
 
-    model_config = SettingsConfigDict(env_prefix="NEO4J_")
+    model_config = SettingsConfigDict(env_prefix="TEMPORAL_STORE_")
 
-    uri: str = Field(
-        default="bolt://localhost:7687",
-        description="Neo4j Bolt protocol URI.",
+    db_path: str = Field(
+        default=":memory:",
+        description="Path to SQLite database on persistent volume, or ':memory:' for tests.",
     )
-    username: str = Field(
-        default="neo4j",
-        description="Neo4j authentication username.",
-    )
-    password: SecretStr = Field(
-        default=SecretStr(""),
-        description="Neo4j authentication password. Never logged.",
-    )
-    database: str = Field(
-        default="selfhealing",
-        description="Neo4j database name for bi-temporal state graph.",
+    history_retention_days: int = Field(
+        default=30,
+        ge=1,
+        le=365,
+        description="Retention window for change timeline events (default 30 days, PRD F-04).",
     )
 
 
@@ -213,7 +207,7 @@ class Settings(BaseSettings):
     )
 
     # ── Subsystem Settings ──
-    neo4j: Neo4jSettings = Field(default_factory=Neo4jSettings)
+    temporal_store: TemporalStoreSettings = Field(default_factory=TemporalStoreSettings)
     e2b: E2BSandboxSettings = Field(default_factory=E2BSandboxSettings)
     llm: LLMSettings = Field(default_factory=LLMSettings)
     pre_filter: PreFilterSettings = Field(default_factory=PreFilterSettings)

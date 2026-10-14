@@ -42,7 +42,12 @@ from app.utils.validation import validate_incident_id
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
-    from app.services.graph_store import BiTemporalGraphStore, TemporalGraphDiff
+    from app.services.temporal_store import (
+        TemporalDiff as TemporalGraphDiff,
+    )
+    from app.services.temporal_store import (
+        TemporalStore as BiTemporalGraphStore,
+    )
 
 from app.services.post_mortem import RunLorePostMortemGenerator
 from app.services.pre_filter import TracePreFilter

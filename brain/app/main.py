@@ -60,7 +60,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         "brain_starting",
         host=settings.brain_host,
         port=settings.brain_port,
-        neo4j_uri=settings.neo4j.uri,
+        temporal_store_db=settings.temporal_store.db_path,
     )
 
     # Yield control to the running application
@@ -118,7 +118,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def readiness_check() -> dict[str, str]:
         return {
             "status": "ready",
-            "neo4j_target": app_settings.neo4j.uri,
+            "temporal_store": app_settings.temporal_store.db_path,
             "transport": app_settings.mcp.transport,
         }
 

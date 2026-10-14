@@ -34,7 +34,12 @@ from app.routers.approval import (
     verify_slack_signature,
 )
 from app.sandbox.e2b_runner import ResourceUsage, SandboxExecutionResult
-from app.services.graph_store import TemporalEntityDiff, TemporalGraphDiff
+from app.services.temporal_store import (
+    TemporalDiff as TemporalGraphDiff,
+)
+from app.services.temporal_store import (
+    TemporalEntityDiff,
+)
 
 
 @pytest.fixture

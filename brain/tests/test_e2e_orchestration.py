@@ -31,9 +31,17 @@ from app.schemas.telemetry import (
     TelemetryEvent,
     TelemetrySource,
 )
-from app.services.graph_store import BiTemporalGraphStore, TemporalEntityDiff, TemporalGraphDiff
 from app.services.orchestrator import RemediationExecutionResult, SREOrchestrationCoordinator
 from app.services.post_mortem import RunLorePostMortemGenerator
+from app.services.temporal_store import (
+    TemporalDiff as TemporalGraphDiff,
+)
+from app.services.temporal_store import (
+    TemporalEntityDiff,
+)
+from app.services.temporal_store import (
+    TemporalStore as BiTemporalGraphStore,
+)
 
 
 def _build_test_event(

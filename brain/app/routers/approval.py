@@ -34,7 +34,7 @@ from app.utils.validation import validate_incident_id
 
 if TYPE_CHECKING:
     from app.sandbox.e2b_runner import SandboxExecutionResult
-    from app.services.graph_store import TemporalGraphDiff
+    from app.services.temporal_store import TemporalDiff as TemporalGraphDiff
 
 router = APIRouter(prefix="/api/v1/approval", tags=["Approval Gate"])
 logger = structlog.get_logger()
