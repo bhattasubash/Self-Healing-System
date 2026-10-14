@@ -59,6 +59,7 @@ class RollbackResult(BaseModel):
 # Known GitOps management markers (Argo CD, Flux)
 GITOPS_LABELS = {
     "app.kubernetes.io/instance",
+    "argocd.argoproj.io/instance",
     "argocd.argoproj.io/tracking-id",
     "kustomize.toolkit.fluxcd.io/name",
     "helm.toolkit.fluxcd.io/name",
