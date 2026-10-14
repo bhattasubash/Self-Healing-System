@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
 
 from app.config import Settings, get_settings
+from app.routers.alert_intake import router as alert_intake_router
 from app.routers.analysis import router as analysis_router
 from app.routers.approval import router as approval_router
 
@@ -123,6 +124,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         }
 
     # ── Mount Routers ──
+    app.include_router(alert_intake_router)
     app.include_router(analysis_router)
     app.include_router(approval_router)
 

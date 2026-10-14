@@ -81,6 +81,10 @@ class AuditLogger:
             self._conn.close()
             self._conn = None
 
+    def __del__(self) -> None:
+        if getattr(self, "_conn", None) is not None:
+            self.close()
+
     def _init_schema(self, conn: sqlite3.Connection) -> None:
         conn.execute(
             """

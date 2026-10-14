@@ -106,22 +106,18 @@ class TemporalStore:
 
     def __init__(self, db_path: str = ":memory:") -> None:
         self.db_path = db_path
-        self._is_memory = db_path == ":memory:" or ":memory:" in db_path
-        self._shared_conn: sqlite3.Connection | None = None
-        if self._is_memory:
-            self._shared_conn = sqlite3.connect(":memory:", check_same_thread=False)
-            self._shared_conn.row_factory = sqlite3.Row
-            self._shared_conn.execute("PRAGMA foreign_keys = ON;")
+        self._conn: sqlite3.Connection | None = sqlite3.connect(
+            db_path, check_same_thread=False
+        )
+        self._conn.row_factory = sqlite3.Row
+        self._conn.execute("PRAGMA foreign_keys = ON;")
         self._log = logger.bind(component="temporal_store", db_path=db_path)
         self._init_db_sync()
 
     def _get_connection(self) -> sqlite3.Connection:
-        if self._is_memory and self._shared_conn is not None:
-            return self._shared_conn
-        conn = sqlite3.connect(self.db_path, check_same_thread=False)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA foreign_keys = ON;")
-        return conn
+        if self._conn is None:
+            raise sqlite3.ProgrammingError("Cannot operate on a closed database.")
+        return self._conn
 
     def _init_db_sync(self) -> None:
         """Initializes tables and indices synchronously."""
@@ -521,7 +517,11 @@ class TemporalStore:
 
     def close(self) -> None:
         """Closes the underlying database connection."""
-        if self._shared_conn is not None:
-            self._shared_conn.close()
-            self._shared_conn = None
+        if self._conn is not None:
+            self._conn.close()
+            self._conn = None
+
+    def __del__(self) -> None:
+        if getattr(self, "_conn", None) is not None:
+            self.close()
 

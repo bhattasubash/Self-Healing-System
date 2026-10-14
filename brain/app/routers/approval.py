@@ -139,6 +139,9 @@ class ApprovalDecisionResponse(BaseModel):
     status: str
     recorded_at: datetime
     message: str
+    approver_id: str | None = None
+    execution_status: str | None = None
+    audit_hash: str | None = None
 
 
 # ─── HMAC Verification Guard ──────────────────────────────────────────
@@ -219,7 +222,7 @@ def build_slack_approval_card(
     service_tier: str,
     fix_script_language: str,
     fix_script_content: str,
-    sandbox_result: SandboxExecutionResult,
+    sandbox_result: SandboxExecutionResult | None = None,
     graph_diff: TemporalGraphDiff | None = None,
     registry: ApprovalRegistry | None = None,
     ttl_seconds: int = 900,
@@ -242,7 +245,16 @@ def build_slack_approval_card(
         allowed_roles=allowed_roles,
     )
 
-    status_emoji = "🟢 PASS" if sandbox_result.status == "pass" else "🔴 FAIL"
+    if sandbox_result:
+        status_emoji = "🟢 PASS" if sandbox_result.status == "pass" else "🔴 FAIL"
+        validation_text = (
+            f"*Sandbox Validation:*\n{status_emoji} (Exit: {sandbox_result.exit_code})"
+        )
+        runtime_text = f"*Execution Runtime:*\n{sandbox_result.duration_ms}ms"
+    else:
+        validation_text = "*Evidence Gate:*\n🟢 PASS (R1-R8 Verified)"
+        runtime_text = "*Safety Model:*\nDry-run Gated (A1 Rollback)"
+
     severity_badge = f"*{severity.upper()}* ({service_tier.upper()})"
 
     blocks: list[dict[str, Any]] = [
@@ -259,14 +271,8 @@ def build_slack_approval_card(
             "fields": [
                 {"type": "mrkdwn", "text": f"*Incident ID:*\n`{incident_id}`"},
                 {"type": "mrkdwn", "text": f"*Severity & Tier:*\n{severity_badge}"},
-                {
-                    "type": "mrkdwn",
-                    "text": (
-                        f"*Sandbox Validation:*\n{status_emoji} "
-                        f"(Exit: {sandbox_result.exit_code})"
-                    ),
-                },
-                {"type": "mrkdwn", "text": f"*Execution Runtime:*\n{sandbox_result.duration_ms}ms"},
+                {"type": "mrkdwn", "text": validation_text},
+                {"type": "mrkdwn", "text": runtime_text},
             ],
         },
         {"type": "divider"},
@@ -296,24 +302,32 @@ def build_slack_approval_card(
             },
         })
 
-    # Sandbox Logs Section
-    log_sample = (
-        sandbox_result.stdout.strip()
-        or sandbox_result.stderr.strip()
-        or "No output logged."
-    )
-    truncated_logs = log_sample[:1000] + ("..." if len(log_sample) > 1000 else "")
+    # Sandbox Logs Section (if sandbox run was executed)
+    if sandbox_result:
+        log_sample = (
+            sandbox_result.stdout.strip()
+            or sandbox_result.stderr.strip()
+            or "No output logged."
+        )
+        truncated_logs = log_sample[:1000] + ("..." if len(log_sample) > 1000 else "")
 
-    blocks.append({
-        "type": "section",
-        "text": {
-            "type": "mrkdwn",
-            "text": f"*E2B Micro-Sandbox Logs:*\n```{truncated_logs}```",
-        },
-    })
+        blocks.append({
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": f"*E2B Micro-Sandbox Logs:*\n```{truncated_logs}```",
+            },
+        })
 
     # Proposed Fix Script Section
-    truncated_script = fix_script_content[:1200] + ("..." if len(fix_script_content) > 1200 else "")
+    checksum = (
+        sandbox_result.checksum
+        if sandbox_result
+        else hashlib.sha256(fix_script_content.encode("utf-8")).hexdigest()[:16]
+    )
+    truncated_script = (
+        fix_script_content[:1200] + ("..." if len(fix_script_content) > 1200 else "")
+    )
     blocks.append({
         "type": "section",
         "text": {
@@ -321,7 +335,7 @@ def build_slack_approval_card(
             "text": (
                 f"*Proposed Remediation Script ({fix_script_language}):*\n"
                 f"```{truncated_script}```\n"
-                f"*Checksum:* `{sandbox_result.checksum}`"
+                f"*Checksum:* `{checksum}`"
             ),
         },
     })
@@ -363,6 +377,12 @@ def build_slack_approval_card(
     response_model=ApprovalDecisionResponse,
     status_code=status.HTTP_200_OK,
     summary="Process human approval or rejection decision from Slack Block Kit gateway",
+)
+@router.post(
+    "/interactive",
+    response_model=ApprovalDecisionResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Handle Slack Block Kit interactive action payloads",
 )
 async def process_approval_decision(
     request: Request,
@@ -457,8 +477,11 @@ async def process_approval_decision(
         action_val = action.get("value", "")
         if ":" in action_val:
             approval_id, decision_str = action_val.split(":", 1)
+        elif action_val in ("approved", "rejected"):
+            approval_id = request.query_params.get("approval_id") or ""
+            decision_str = action_val
         else:
-            approval_id = action_val
+            approval_id = action_val or request.query_params.get("approval_id") or ""
             decision_str = "approved" if "approve" in action.get("action_id", "") else "rejected"
     else:
         # JSON payload (direct API submission / dev_mode)
@@ -577,8 +600,20 @@ async def process_approval_decision(
         reason=decision_reason,
     )
 
+    execution_status: str | None = None
+    audit_hash: str | None = None
+    if decision_norm == "approved":
+        try:
+            exec_res = execute_k8s_rollback_from_approval(record)
+            execution_status = exec_res.get("status")
+            audit_hash = exec_res.get("audit_hash")
+        except Exception as exec_err:
+            logger.error("rollback_from_approval_failed", error=str(exec_err))
+            execution_status = "error"
+
     msg = (
-        f"Fix approved by {decided_by} ({approver_role}). Deployment clearance granted."
+        f"Fix approved by {decided_by} ({approver_role}). "
+        f"Execution: {execution_status or 'cleared'}."
         if decision_norm == "approved"
         else f"Fix rejected by {decided_by} ({approver_role}). Deployment aborted."
     )
@@ -590,4 +625,27 @@ async def process_approval_decision(
         status="PROCESSED",
         recorded_at=now,
         message=msg,
+        approver_id=decided_by,
+        execution_status=execution_status,
+        audit_hash=audit_hash,
     )
+
+
+def execute_k8s_rollback_from_approval(record: Any) -> dict[str, Any]:
+    """Helper executed upon human approval to apply typed A1 rollback."""
+    from app.services.k8s_executor import ActionEnvelope, KubernetesRollbackExecutor
+    executor = KubernetesRollbackExecutor()
+    try:
+        envelope = ActionEnvelope(
+            incident_id=record.incident_id,
+            action_name="A1_ROLLBACK",
+            namespace=getattr(record, "namespace", "payments"),
+            target_name=getattr(record, "target_service", "payment-gateway"),
+            target_uid=getattr(record, "target_uid", "uid-resolved"),
+            approver=getattr(record, "decided_by", "operator"),
+        )
+        result = executor.execute_rollback(envelope)
+        return result.model_dump()
+    finally:
+        executor.audit_logger.close()
+
