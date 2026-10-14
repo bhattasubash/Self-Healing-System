@@ -30,6 +30,9 @@ dependencies = [
     # ── HTTP Client ──
     "httpx>=0.28.0",
 
+    # ── Kubernetes Actuator ──
+    "kubernetes>=31.0.0",
+
     # ── Utilities ──
     "python-dotenv>=1.1.0",
     "structlog>=25.1.0",
@@ -101,6 +104,7 @@ check_untyped_defs = true
 [[tool.mypy.overrides]]
 module = [
     "e2b.*",
+    "kubernetes.*",
 ]
 ignore_missing_imports = true
 
