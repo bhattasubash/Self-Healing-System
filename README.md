@@ -1,68 +1,69 @@
-# Privacy-First, Simulation-Gated AI SRE Agent Framework
+# Project Heal: Edge-First Kubernetes Remediation Agent
 
-An autonomous, decentralized Site Reliability Engineering (SRE) agent designed to query production infrastructure safely without centralizing customer telemetry or infrastructure topology.
+An edge-first, safety-critical Kubernetes remediation agent that detects bad-change incidents, evaluates deterministic evidence gates on historical telemetry, and executes a strictly allowlisted set of reversible actions under customer-owned policy.
 
 ---
 
 ## 🏛️ Architecture Overview
 
 ```
-                      [ Client Infrastructure Mesh ]
-                                   │
-                                   ▼
-                    [ Local TypeScript MCP Client ]
-                       (@modelcontextprotocol/sdk)
-                                   │
-                        Reversible ID Masking (opensre pattern)
-                                   │
-                                   ▼
-                    [ Zero-Token Regex Pre-Filter ]
-                    (Deduplication & Noise Scrubbing)
-                                   │
-                                   ▼
-                   [ Python FastAPI Analytical Brain ]
-                                   │
-                ┌──────────────────┴──────────────────┐
-                ▼                                     ▼
-    [ Neo4j Bi-Temporal Graph ]             [ Deterministic FSM ]
-   (Graphiti State Tracking)             (INGEST ➔ FILTER ➔ ANALYZE...)
-                │                                     │
-                └──────────────────┬──────────────────┘
-                                   │
-                                   ▼
-                     [ Simulation Validation Gate ]
-                   ┌───────────────┴───────────────┐
-                   ▼                               ▼
-       [ E2B Micro-Sandbox Runner ]     [ Git Worktree Zone (YYLO) ]
-       (Static Security Barrier)        (Detached config isolation)
-                   │                               │
-                   └───────────────┬───────────────┘
-                                   │
-                                   ▼
-                     [ Human Verification Gate ]
-                      (Slack Block Kit + HMAC)
-                                   │
-                        ┌──────────┴──────────┐
-                        ▼                     ▼
-                  [ Approved ]           [ Rejected ]
-                        │                     │
-                        ▼                     ▼
-                 [ Worktree Commit ]    [ Teardown & Abort ]
-                        │
-                        ▼
-            [ RunLore Post-Mortem MD ]
-           (.incidents/incident-<id>.md)
+                      [ Cluster Infrastructure / Alertmanager ]
+                                        │
+                                        ▼
+                         [ Edge Ingress & Content Scanner ]
+                           (Fail-closed secret detection)
+                                        │
+                                        ▼
+                        [ SQLite Bi-Temporal Store ]
+                   (valid_from, valid_to, recorded_at timeline)
+                                        │
+                                        ▼
+                        [ Deterministic Evidence Gate ]
+                       (Rules R1–R8: Tier A / B / C triage)
+                                        │
+                     ┌──────────────────┴──────────────────┐
+                     ▼                                     ▼
+           [ Tier A / B Eligible ]               [ Tier C Escalation ]
+                     │                            (Irreversible / GitOps /
+                     ▼                             Concurrent rollout)
+            [ Slack Block Kit Card ]
+         (HMAC signature + 15m TTL)
+                     │
+           ┌─────────┴─────────┐
+           ▼                   ▼
+      [ Approved ]        [ Rejected ]
+           │                   │
+           ▼                   ▼
+    [ Typed Action A1 ]     [ Abort & Audit ]
+    - Server dry-run diff
+    - Namespaced UID bind
+    - AppsV1Api rollback
+    - Verification check
+    - (Single auto-undo)
+           │
+           ▼
+    [ SHA-256 Audit Chain ]
+  (Tamper-evident append-only)
+           │
+           ▼
+    [ RunLore Post-Mortem ]
+  (.incidents/incident-<id>.md)
 ```
 
 ---
 
-## 🛡️ Core Security & Privacy Invariants
+## 🛡️ Core Safety Invariants & Claim Grounding (PRD Section 6.3)
 
-1. **Zero Data Centralization**: Telemetry vectors and host configurations stay inside the client's internal network mesh. External AI models only receive tokenized, regex-scrubbed context envelopes via local JSON-RPC.
-2. **Reversible Identifier Masking (opensre pattern)**: Infrastructure identifiers (IPs, ARNs, cluster IDs, hostnames, container hashes) are replaced with deterministic session tokens in-memory. The token dictionary lives in volatile RAM and is destroyed on disconnect.
-3. **Deterministic FSM Engine Pathways**: No autonomous agentic route hopping. State flow strictly follows explicit transitions: `INGEST ➔ FILTER ➔ ANALYZE ➔ SANDBOX ➔ APPROVE ➔ DEPLOY ➔ COMPLETED`.
-4. **Static Security Barrier**: Static regex scanner intercepts and blocks destructive commands (`rm -rf /`, `mkfs`, `dd if=`, `kubectl delete namespace --all`, `DROP DATABASE`, fork bombs) *before* any runtime container is spun up.
-5. **Simulation-Gated Write Access**: Zero blind production modifications. Every fix is simulated in an ephemeral E2B micro-sandbox, staged in a detached git worktree, and requires explicit human verification via Slack HMAC-authenticated Block Kit cards.
+Every claim in Project Heal is tagged as **[M] Measured**, **[T] Target**, or **[A] Assumption**. We never claim a number or capability we have not verified.
+
+| Subject | Claim / Posture | PRD Replacement & Reality | Status |
+| --- | --- | --- | --- |
+| **Data Privacy** | Raw telemetry stays in your environment. | Only masked, minimized context leaves; you can preview every outbound payload. Server-side content scanner fails closed on unmasked secrets. | **[M]** 100% recall on 7-class synthetic secret test corpus |
+| **Production Safety** | Typed action allowlist with dry-run diff. | Sandboxes validate generated artifacts (manifests, policy tests), not production safety. Production safety comes from server-side dry-run diffs, policy gates, verification stabilization, and at most one automatic undo. | **[M]** 96 automated tests + 5 lab chaos tests green |
+| **Root Cause & Execution** | Deterministic Evidence Gate (Rules R1–R8). | Best LLMs achieve ~25% accuracy on root-cause analysis; therefore deterministic rules decide proposals. The LLM only explains, cites evidence IDs, and lists unknowns. No LLM-authored text is ever executed. | **[M]** Evaluated deterministically across T-01 to T-28 matrix |
+| **Telemetry History** | Relational bi-temporal change timeline. | Kubernetes events expire after 1 hour. Project Heal tracks change records with `valid_from`, `valid_to`, and `recorded_at` in an append-only relational SQLite store. | **[M]** Bi-temporal snapshot and diff verified |
+| **GitOps Awareness** | Argo CD & Flux automatic detection. | If automated sync / self-heal is active, direct Kubernetes rollback is blocked. The agent routes to an A2 GitOps revert PR instead. | **[M]** Argo CD instance label guard verified |
+| **Audit Integrity** | SHA-256 append-only hash chain. | Every triage decision, dry-run diff, human approval, execution, and verification result is hashed into an immutable chain. If an audit write fails, execution aborts. | **[M]** Tamper detection and fail-closed audit verified |
 
 ---
 
@@ -70,48 +71,56 @@ An autonomous, decentralized Site Reliability Engineering (SRE) agent designed t
 
 ```text
 .
-├── packages/
-│   └── mcp-client/                    # TypeScript MCP Node Client
-│       ├── src/
-│       │   ├── index.ts               # MCP Server entrypoint (stdio JSON-RPC)
-│       │   ├── tools/registry.ts      # Declarative tool manifest (Prometheus, K8s, etc.)
-│       │   ├── masking/reversible.ts  # Reversible ID tokenizer
-│       │   └── types/schemas.ts       # Zod runtime schemas
-│       ├── tests/                     # Vitest unit tests
-│       ├── tsconfig.json
-│       └── package.json
-│
-├── brain/                             # Python FastAPI Analytical Brain
+├── brain/                             # Analytical Reasoning Brain (FastAPI)
 │   ├── app/
-│   │   ├── main.py                    # FastAPI application & lifespan
-│   │   ├── config.py                  # Pydantic v2 settings
+│   │   ├── main.py                    # Application entrypoint & lifespan
+│   │   ├── config.py                  # Pydantic v2 settings & role mappings
 │   │   ├── routers/
-│   │   │   ├── analysis.py            # POST /api/v1/analyze
-│   │   │   └── approval.py            # POST /api/v1/approval/decision (HMAC)
+│   │   │   ├── alert_intake.py        # POST /api/v1/alerts/alertmanager (< 3s ack)
+│   │   │   ├── analysis.py            # POST /api/v1/analyze (regex pre-filtering)
+│   │   │   └── approval.py            # POST /api/v1/approval/interactive (Slack HMAC)
 │   │   ├── sandbox/
-│   │   │   ├── e2b_runner.py          # E2B micro-sandbox driver & security barrier
-│   │   │   └── worktree.py            # Git worktree manager (YYLO pattern)
-│   │   ├── schemas/telemetry.py       # Pydantic v2 telemetry & FSM models
+│   │   │   ├── e2b_runner.py          # E2B micro-sandbox driver for artifact simulation
+│   │   │   └── worktree.py            # Detached git worktree isolation
+│   │   ├── schemas/telemetry.py       # Pydantic v2 telemetry, FSM, and event schemas
 │   │   └── services/
-│   │       ├── graph_store.py         # Async Neo4j bi-temporal graph service
+│   │       ├── audit_logger.py        # SHA-256 append-only tamper-evident audit hash chain
+│   │       ├── content_scanner.py     # Server-side regex + Shannon entropy secret scanner
+│   │       ├── evidence_gate.py       # Deterministic rules evaluator (R1–R8)
+│   │       ├── k8s_executor.py        # Typed Action A1 rollback (AppsV1Api, dry-run, undo)
 │   │       ├── orchestrator.py        # End-to-end incident orchestration loop
 │   │       ├── post_mortem.py         # RunLore automated markdown post-mortem generator
-│   │       ├── pre_filter.py          # Regex-first trace pre-filter
-│   │       └── state_machine.py       # Deterministic FSM controller
-│   ├── tests/                         # Pytest test suite (38 tests)
+│   │       ├── pre_filter.py          # Zero-token regex trace pre-filter
+│   │       ├── state_machine.py       # Deterministic SRE finite-state machine
+│   │       └── temporal_store.py      # SQLite bi-temporal relational store
+│   ├── tests/                         # Pytest test suite (96 tests, 90.38% coverage)
 │   └── pyproject.toml
 │
-├── shared/
-│   └── contracts/                     # Shared canonical JSON Schema contracts
-│       ├── tool-call.schema.json
-│       ├── telemetry.schema.json
-│       └── approval.schema.json
+├── lab/                               # Local Chaos Lab & Scenario Verification
+│   ├── kind-config.yaml               # kind local cluster configuration
+│   ├── manifests/                     # Sample 'payments' microservice manifests
+│   │   ├── 00-namespace.yaml
+│   │   ├── 01-configmap.yaml
+│   │   ├── 02-payment-gateway-deployment.yaml
+│   │   └── 03-service.yaml
+│   ├── injections/                    # Scripted failure injection drivers
+│   │   ├── inject_t01_bad_image.py    # T-01: Bad image tag (ImagePullBackOff)
+│   │   ├── inject_t02_crashloop.py    # T-02: Crashing startup args (CrashLoopBackOff)
+│   │   └── inject_t04_failing_readiness.py # T-04: Broken readiness probe (0/3 ready)
+│   ├── test_lab_scenarios.py          # Automated verification for T-01, T-02, T-04, T-09
+│   └── README.md
 │
-├── infra/
-│   └── neo4j/
-│       └── init.cypher                # Bi-temporal schema constraints & seed graph
-├── .env.example                       # Environment configuration template
-└── README.md
+├── packages/                          # TypeScript MCP Client
+│   └── mcp-client/
+│       ├── src/
+│       │   ├── index.ts               # MCP Server entrypoint (stdio JSON-RPC)
+│       │   ├── masking/reversible.ts  # Reversible ID tokenizer
+│       │   └── tools/registry.ts      # Read-only Kubernetes & Prometheus tools
+│       └── tests/                     # Vitest test suite (14 tests)
+│
+└── .github/workflows/                 # CI/CD and Security Gates
+    ├── ci.yml                         # Brain tests, coverage gate (>= 80%), MCP client
+    └── security.yml                   # Bandit, pip-audit, and secret scanning
 ```
 
 ---
@@ -119,40 +128,39 @@ An autonomous, decentralized Site Reliability Engineering (SRE) agent designed t
 ## 🚀 Quick Start
 
 ### 1. Prerequisites
-- Node.js >= 20.0.0
 - Python >= 3.12
-- Git
+- Node.js >= 20.0.0
+- Docker & kind (optional, for live cluster lab)
 
-### 2. TypeScript MCP Client
-```bash
-cd packages/mcp-client
-npm install
-npm run build
-npm test
-```
-
-### 3. Python Brain Service
+### 2. Run Python Brain Service
 ```bash
 cd brain
-pip install -e .
-pytest tests/
+pip install -e ".[dev]"
+
+# Run full test suite with coverage gate
+pytest -q --cov=app --cov-report=term-missing --cov-fail-under=80
+
+# Start brain service
+uvicorn app.main:app --host 127.0.0.1 --port 8000
 ```
 
-### 4. Running the Brain Service
+### 3. Run Chaos Lab Scenarios
 ```bash
-cp .env.example .env
-# Edit .env with your environment settings
-brain
-# Or run with uvicorn:
-uvicorn app.main:app --host 127.0.0.1 --port 8000
+# Run automated scenario tests (T-01, T-02, T-04, T-09, GitOps guard)
+pytest lab/test_lab_scenarios.py -v
 ```
 
 ---
 
-## 🧪 Test Verification Matrix
+## 🧪 Verification Matrix
 
-- **Python Tests**: 38/38 passing across 8 suites (`test_analysis_router`, `test_approval_router`, `test_e2b_runner`, `test_e2e_orchestration`, `test_graph_store`, `test_pre_filter`, `test_state_machine`, `test_worktree`).
-- **TypeScript Tests**: 14/14 passing across 2 suites (`masking.test.ts`, `tools.test.ts`), with strict `tsc --noEmit` clean compile.
+- **Brain Tests**: 96/96 passing (`brain/tests/`), **90.38% statement coverage** (exceeds 80% CI requirement).
+- **Chaos Lab Scenarios**: 5/5 passing (`lab/test_lab_scenarios.py`).
+- **MCP Client**: 14/14 passing (`packages/mcp-client/`), strict TypeScript compile clean.
+- **Static Security & Linting**:
+  - `ruff check app tests` clean (0 findings).
+  - `mypy --explicit-package-bases app` clean (0 findings across 19 source files).
+  - Secret scanning recall: 100% across 7 secret classes on seeded corpus.
 
 ---
 
