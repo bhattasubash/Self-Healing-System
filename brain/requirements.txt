@@ -55,7 +55,7 @@ colorama==0.4.6
     # via
     #   pytest
     #   typer
-connectrpc==0.11.1
+connectrpc==0.12.1
     # via e2b
 coverage[toml]==7.16.2
     # via pytest-cov
