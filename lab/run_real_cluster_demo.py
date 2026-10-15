@@ -80,8 +80,17 @@ async def run_demo() -> dict[str, Any]:
     # Step 1: Baseline health check
     print("\n[Step 1] Ensuring baseline health (hashicorp/http-echo:0.2.3)...")
     t0 = time.time()
-    current_image = deploy.spec.template.spec.containers[0].image
-    if current_image != "hashicorp/http-echo:0.2.3":
+    container = deploy.spec.template.spec.containers[0]
+    current_image = container.image
+    current_cmd = container.command
+    current_probe = container.readiness_probe
+    probe_path = current_probe.http_get.path if current_probe and current_probe.http_get else ""
+
+    if (
+        current_image != "hashicorp/http-echo:0.2.3"
+        or current_cmd is not None
+        or probe_path != "/"
+    ):
         patch_body = {
             "spec": {
                 "template": {
@@ -92,6 +101,11 @@ async def run_demo() -> dict[str, Any]:
                                 "image": "hashicorp/http-echo:0.2.3",
                                 "command": None,
                                 "args": ["-text=payment-gateway-healthy-v1", "-listen=:8080"],
+                                "readinessProbe": {
+                                    "httpGet": {"path": "/", "port": 8080},
+                                    "initialDelaySeconds": 2,
+                                    "periodSeconds": 3,
+                                },
                             }
                         ]
                     }
@@ -117,6 +131,16 @@ async def run_demo() -> dict[str, Any]:
         tmp_db.unlink()
     temporal_store = TemporalStore(db_path=str(tmp_db))
     set_alert_temporal_store(temporal_store)
+
+    demo_approval_db = Path("./demo_approval.db").resolve()
+    if demo_approval_db.exists():
+        demo_approval_db.unlink()
+    from app.routers import approval
+    from app.services.approval_store import SQLiteApprovalRegistry
+
+    approval_registry = SQLiteApprovalRegistry(db_path=str(demo_approval_db))
+    approval._GLOBAL_APPROVAL_REGISTRY = approval_registry
+    app.dependency_overrides[approval.get_approval_registry] = lambda: approval_registry
 
     collector = KubernetesCollector()
     await collector.sync_all(temporal_store, "payments")
