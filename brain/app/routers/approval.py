@@ -22,7 +22,7 @@ import hmac
 import json
 import time
 import urllib.parse
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Annotated, Any
 
 import structlog
@@ -30,6 +30,9 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
 from pydantic import BaseModel, Field, field_validator
 
 from app.config import Settings, get_settings
+from app.services.approval_store import (
+    SQLiteApprovalRegistry,
+)
 from app.utils.validation import validate_incident_id
 
 if TYPE_CHECKING:
@@ -42,72 +45,11 @@ logger = structlog.get_logger()
 # Maximum allowed clock drift for Slack webhook requests (5 minutes)
 SLACK_TIMESTAMP_TOLERANCE_SECONDS = 300
 
-
-# ─── Stateful Approval Registry ────────────────────────────────────────
-
-
-class ApprovalRecord(BaseModel):
-    """Tracked state for a human remediation approval request."""
-
-    approval_id: str
-    incident_id: str
-    status: str = "pending"  # "pending" | "approved" | "rejected" | "expired"
-    created_at: datetime
-    expires_at: datetime
-    target_service: str = ""
-    proposed_action: str = ""
-    allowed_roles: list[str] = Field(
-        default_factory=lambda: ["sre-lead", "incident-commander", "admin"]
-    )
-    decided_by: str | None = None
-    decided_at: datetime | None = None
-    decision_reason: str | None = None
+ApprovalRegistry = SQLiteApprovalRegistry
+_GLOBAL_APPROVAL_REGISTRY = SQLiteApprovalRegistry()
 
 
-class ApprovalRegistry:
-    """
-    Registry enforcing existence, TTL, single-use, and role gating for approvals.
-    """
-
-    def __init__(self, default_ttl_seconds: int = 900) -> None:
-        self._records: dict[str, ApprovalRecord] = {}
-        self._default_ttl_seconds = default_ttl_seconds
-
-    def register_request(
-        self,
-        approval_id: str,
-        incident_id: str,
-        target_service: str = "",
-        proposed_action: str = "",
-        ttl_seconds: int | None = None,
-        allowed_roles: list[str] | None = None,
-    ) -> ApprovalRecord:
-        now = datetime.now(UTC)
-        ttl = ttl_seconds if ttl_seconds is not None else self._default_ttl_seconds
-        record = ApprovalRecord(
-            approval_id=approval_id,
-            incident_id=validate_incident_id(incident_id),
-            status="pending",
-            created_at=now,
-            expires_at=now + timedelta(seconds=ttl),
-            target_service=target_service,
-            proposed_action=proposed_action,
-            allowed_roles=allowed_roles or ["sre-lead", "incident-commander", "admin"],
-        )
-        self._records[approval_id] = record
-        return record
-
-    def get_request(self, approval_id: str) -> ApprovalRecord | None:
-        return self._records.get(approval_id)
-
-    def clear(self) -> None:
-        self._records.clear()
-
-
-_GLOBAL_APPROVAL_REGISTRY = ApprovalRegistry()
-
-
-def get_approval_registry() -> ApprovalRegistry:
+def get_approval_registry() -> SQLiteApprovalRegistry:
     return _GLOBAL_APPROVAL_REGISTRY
 
 
@@ -611,6 +553,10 @@ async def process_approval_decision(
             logger.error("rollback_from_approval_failed", error=str(exec_err))
             execution_status = "error"
 
+    record.execution_status = execution_status
+    record.audit_hash = audit_hash
+    registry.update_record(record)
+
     msg = (
         f"Fix approved by {decided_by} ({approver_role}). "
         f"Execution: {execution_status or 'cleared'}."
@@ -639,10 +585,10 @@ def execute_k8s_rollback_from_approval(record: Any) -> dict[str, Any]:
         envelope = ActionEnvelope(
             incident_id=record.incident_id,
             action_name="A1_ROLLBACK",
-            namespace=getattr(record, "namespace", "payments"),
+            namespace=getattr(record, "namespace", "default") or "default",
             target_name=getattr(record, "target_service", "payment-gateway"),
-            target_uid=getattr(record, "target_uid", "uid-resolved"),
-            approver=getattr(record, "decided_by", "operator"),
+            target_uid=getattr(record, "target_uid", ""),
+            approver=getattr(record, "decided_by", "operator") or "operator",
         )
         result = executor.execute_rollback(envelope)
         return result.model_dump()

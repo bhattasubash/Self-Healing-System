@@ -212,6 +212,71 @@ class TemporalStore:
                 created_at=datetime.fromisoformat(row["created_at"]),
             )
 
+    async def get_entity_by_name(
+        self, namespace: str, name: str, kind: str | None = None
+    ) -> EntityRecord | None:
+        """Retrieves entity metadata by namespace and name (optional kind filter)."""
+        return await asyncio.to_thread(self._get_entity_by_name_sync, namespace, name, kind)
+
+    def _get_entity_by_name_sync(
+        self, namespace: str, name: str, kind: str | None = None
+    ) -> EntityRecord | None:
+        with self._get_connection() as conn:
+            if kind:
+                query = (
+                    "SELECT uid, kind, namespace, name, created_at FROM entities "
+                    "WHERE namespace = ? AND name = ? AND kind = ?"
+                )
+                row = conn.execute(query, (namespace, name, kind)).fetchone()
+            else:
+                query = (
+                    "SELECT uid, kind, namespace, name, created_at FROM entities "
+                    "WHERE namespace = ? AND name = ?"
+                )
+                row = conn.execute(query, (namespace, name)).fetchone()
+            if not row:
+                return None
+            return EntityRecord(
+                uid=row["uid"],
+                kind=row["kind"],
+                namespace=row["namespace"],
+                name=row["name"],
+                created_at=datetime.fromisoformat(row["created_at"]),
+            )
+
+    async def get_changes_for_entity(self, entity_uid: str) -> list[ChangeRecord]:
+        """Retrieves all changes recorded for an entity ordered by valid_from."""
+        return await asyncio.to_thread(self._get_changes_for_entity_sync, entity_uid)
+
+    def _get_changes_for_entity_sync(self, entity_uid: str) -> list[ChangeRecord]:
+        with self._get_connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, entity_uid, change_type, summary, before_state,
+                       after_state, valid_from, valid_to, recorded_at, source, actor
+                FROM changes
+                WHERE entity_uid = ?
+                ORDER BY valid_from ASC
+                """,
+                (entity_uid,),
+            ).fetchall()
+            return [
+                ChangeRecord(
+                    id=row["id"],
+                    entity_uid=row["entity_uid"],
+                    change_type=row["change_type"],
+                    summary=row["summary"],
+                    before_state=json.loads(row["before_state"]),
+                    after_state=json.loads(row["after_state"]),
+                    valid_from=datetime.fromisoformat(row["valid_from"]),
+                    valid_to=datetime.fromisoformat(row["valid_to"]) if row["valid_to"] else None,
+                    recorded_at=datetime.fromisoformat(row["recorded_at"]),
+                    source=row["source"],
+                    actor=row["actor"],
+                )
+                for row in rows
+            ]
+
     # ── 2. Change Lifecycle Management ──
 
     async def record_change(self, change: ChangeRecord) -> None:
@@ -283,6 +348,38 @@ class TemporalStore:
         return await asyncio.to_thread(self._get_observations_sync, entity_uid, limit)
 
     def _get_observations_sync(self, entity_uid: str, limit: int) -> list[ObservationRecord]:
+        with self._get_connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, entity_uid, timestamp, metric_name, value, status
+                FROM observations
+                WHERE entity_uid = ?
+                ORDER BY timestamp DESC
+                LIMIT ?
+                """,
+                (entity_uid, limit),
+            ).fetchall()
+            return [
+                ObservationRecord(
+                    id=row["id"],
+                    entity_uid=row["entity_uid"],
+                    timestamp=datetime.fromisoformat(row["timestamp"]),
+                    metric_name=row["metric_name"],
+                    value=row["value"],
+                    status=row["status"],
+                )
+                for row in rows
+            ]
+
+    async def get_observations_for_entity(
+        self, entity_uid: str, limit: int = 100
+    ) -> list[ObservationRecord]:
+        """Retrieves recent observations recorded for an entity."""
+        return await asyncio.to_thread(self._get_observations_for_entity_sync, entity_uid, limit)
+
+    def _get_observations_for_entity_sync(
+        self, entity_uid: str, limit: int = 100
+    ) -> list[ObservationRecord]:
         with self._get_connection() as conn:
             rows = conn.execute(
                 """

@@ -179,6 +179,17 @@ class MaskingSettings(BaseSettings):
     )
 
 
+class AlertSettings(BaseSettings):
+    """Alert intake webhook authentication and configuration."""
+
+    model_config = SettingsConfigDict(env_prefix="ALERT_")
+
+    auth_token: SecretStr = Field(
+        default=SecretStr(""),
+        description="Authentication token for /api/v1/alerts endpoints. Fail closed if not set.",
+    )
+
+
 class Settings(BaseSettings):
     """
     Root application settings.
@@ -214,6 +225,7 @@ class Settings(BaseSettings):
     slack: SlackSettings = Field(default_factory=SlackSettings)
     mcp: MCPSettings = Field(default_factory=MCPSettings)
     masking: MaskingSettings = Field(default_factory=MaskingSettings)
+    alert: AlertSettings = Field(default_factory=AlertSettings)
 
 
 # ─── Singleton accessor ──────────────────────────────────────────────
