@@ -19,13 +19,14 @@ Outputs measured latencies, event hashes, and test results.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import json
 import sys
 import time
 import urllib.parse
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -56,7 +57,7 @@ def compute_slack_headers(body: bytes, secret: str = DEMO_SLACK_SECRET) -> dict[
     }
 
 
-def run_demo() -> dict[str, Any]:
+async def run_demo() -> dict[str, Any]:
     print("=" * 70)
     print("PROJECT HEAL: GATE G0 END-TO-END REAL CLUSTER VERIFICATION DEMO")
     print("=" * 70)
@@ -106,7 +107,7 @@ def run_demo() -> dict[str, Any]:
         status = d.status
         if status and status.ready_replicas == 3 and (status.unavailable_replicas or 0) == 0:
             break
-        time.sleep(1)
+        await asyncio.sleep(1)
     baseline_time = time.time() - t0
     print(f"  Baseline confirmed healthy: 3/3 ready replicas ({baseline_time:.2f}s)")
 
@@ -117,8 +118,8 @@ def run_demo() -> dict[str, Any]:
     temporal_store = TemporalStore(db_path=str(tmp_db))
     set_alert_temporal_store(temporal_store)
 
-    collector = KubernetesCollector(temporal_store=temporal_store)
-    collector.sync_all("payments")
+    collector = KubernetesCollector()
+    await collector.sync_all(temporal_store, "payments")
 
     # Step 2: Inject failure (T-01: Bad image tag)
     print("\n[Step 2] Injecting T-01 failure: Bad image tag deploy...")
@@ -144,13 +145,13 @@ def run_demo() -> dict[str, Any]:
                     break
         if failure_observed:
             break
-        time.sleep(1)
+        await asyncio.sleep(1)
     inject_duration = time.time() - t_inject
     print(f"  Failure observed on cluster in {inject_duration:.2f}s: ImagePullBackOff")
 
     # Step 3: Informer syncs real cluster state
     print("\n[Step 3] KubernetesCollector syncing live cluster state into TemporalStore...")
-    sync_counts = collector.sync_all("payments")
+    sync_counts = await collector.sync_all(temporal_store, "payments")
     print(f"  Synced: {sync_counts}")
 
     # Step 4: Fire alert to Brain
@@ -164,6 +165,7 @@ def run_demo() -> dict[str, Any]:
     app.dependency_overrides[get_settings] = lambda: settings
 
     t_gate = time.time()
+    alert_time = datetime.now(UTC) + timedelta(seconds=2)
     alert_payload = {
         "receiver": "heal-webhook",
         "status": "firing",
@@ -181,7 +183,7 @@ def run_demo() -> dict[str, Any]:
                     "summary": "Deployment payments/payment-gateway rollout is stuck",
                     "description": f"ImagePullBackOff: Failed to pull image '{bad_image}'",
                 },
-                "startsAt": datetime.now(UTC).isoformat(),
+                "startsAt": alert_time.isoformat(),
                 "fingerprint": "demo-fingerprint-t01",
             }
         ],
@@ -276,5 +278,9 @@ def run_demo() -> dict[str, Any]:
     return results
 
 
+def main() -> None:
+    asyncio.run(run_demo())
+
+
 if __name__ == "__main__":
-    run_demo()
+    main()

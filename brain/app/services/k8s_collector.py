@@ -187,6 +187,8 @@ class KubernetesCollector:
                 before_state={},
                 after_state={
                     "revision": revision,
+                    "replicaset_uid": uid,
+                    "replicaset_name": name,
                     "owner_deployment_uid": owner_uid,
                     "images": images,
                     "replicas": getattr(spec, "replicas", 0),

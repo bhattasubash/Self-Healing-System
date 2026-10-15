@@ -14,13 +14,14 @@ Executes against a live Kubernetes/kind cluster with NO MagicMock:
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import json
 import sys
 import time
 import urllib.parse
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -54,6 +55,7 @@ def _compute_slack_headers(
     return {
         "X-Slack-Request-Timestamp": ts,
         "X-Slack-Signature": sig,
+        "Content-Type": "application/x-www-form-urlencoded",
     }
 
 
@@ -143,7 +145,15 @@ def _ensure_baseline_healthy(apps_api: Any, core_api: Any) -> None:
     """Ensures payment-gateway deployment is at healthy revision with image hashicorp/http-echo:0.2.3."""
     deploy = apps_api.read_namespaced_deployment(name="payment-gateway", namespace="payments")
     current_image = deploy.spec.template.spec.containers[0].image
-    if current_image != "hashicorp/http-echo:0.2.3":
+    current_cmd = deploy.spec.template.spec.containers[0].command
+    current_probe = deploy.spec.template.spec.containers[0].readiness_probe
+    probe_path = current_probe.http_get.path if current_probe and current_probe.http_get else ""
+
+    if (
+        current_image != "hashicorp/http-echo:0.2.3"
+        or current_cmd is not None
+        or probe_path != "/"
+    ):
         patch_body = {
             "spec": {
                 "template": {
@@ -154,6 +164,11 @@ def _ensure_baseline_healthy(apps_api: Any, core_api: Any) -> None:
                                 "image": "hashicorp/http-echo:0.2.3",
                                 "command": None,
                                 "args": ["-text=payment-gateway-healthy-v1", "-listen=:8080"],
+                                "readinessProbe": {
+                                    "httpGet": {"path": "/", "port": 8080},
+                                    "initialDelaySeconds": 2,
+                                    "periodSeconds": 3,
+                                },
                             }
                         ]
                     }
@@ -174,7 +189,8 @@ def _ensure_baseline_healthy(apps_api: Any, core_api: Any) -> None:
 
 
 @pytest.mark.skipif(not is_k8s_cluster_reachable(), reason="Live Kubernetes cluster not available")
-def test_real_cluster_connectivity() -> None:
+@pytest.mark.asyncio
+async def test_real_cluster_connectivity() -> None:
     """Verifies connection to real Kubernetes cluster and payments namespace."""
     core_api = get_real_cluster_core_api()
     namespaces = [ns.metadata.name for ns in core_api.list_namespace().items]
@@ -186,16 +202,17 @@ def test_real_cluster_connectivity() -> None:
 
 
 @pytest.mark.skipif(not is_k8s_cluster_reachable(), reason="Live Kubernetes cluster not available")
-def test_real_cluster_collector_sync(live_temporal_store: TemporalStore) -> None:
+@pytest.mark.asyncio
+async def test_real_cluster_collector_sync(live_temporal_store: TemporalStore) -> None:
     """Verifies that KubernetesCollector populates TemporalStore from real cluster."""
-    collector = KubernetesCollector(temporal_store=live_temporal_store)
-    counts = collector.sync_all(namespace="payments")
+    collector = KubernetesCollector()
+    counts = await collector.sync_all(live_temporal_store, namespace="payments")
 
     assert counts["deployments"] >= 1
-    assert counts["replicasets"] >= 1
+    assert counts["replica_sets"] >= 1
     assert counts["pods"] >= 1
 
-    entity = live_temporal_store.get_entity_by_name(
+    entity = await live_temporal_store.get_entity_by_name(
         namespace="payments", name="payment-gateway", kind="Deployment"
     )
     assert entity is not None
@@ -203,7 +220,8 @@ def test_real_cluster_collector_sync(live_temporal_store: TemporalStore) -> None
 
 
 @pytest.mark.skipif(not is_k8s_cluster_reachable(), reason="Live Kubernetes cluster not available")
-def test_real_cluster_t01_bad_image_rollback_flow(
+@pytest.mark.asyncio
+async def test_real_cluster_t01_bad_image_rollback_flow(
     client: TestClient,
     override_settings: None,
     live_temporal_store: TemporalStore,
@@ -224,13 +242,11 @@ def test_real_cluster_t01_bad_image_rollback_flow(
     """
     apps_api = get_real_cluster_apps_api()
     core_api = get_real_cluster_core_api()
-    collector = KubernetesCollector(temporal_store=live_temporal_store)
+    collector = KubernetesCollector()
 
     # 1. Baseline healthy
     _ensure_baseline_healthy(apps_api, core_api)
-
-    # Sync baseline state to TemporalStore
-    collector.sync_all("payments")
+    await collector.sync_all(live_temporal_store, "payments")
 
     # 2. Inject Failure: Bad Image Tag
     bad_image = "hashicorp/http-echo:v2-broken-tag-xyz"
@@ -262,15 +278,15 @@ def test_real_cluster_t01_bad_image_rollback_flow(
                     break
         if failure_observed:
             break
-        time.sleep(1)
+        await asyncio.sleep(1)
 
     assert failure_observed, "Expected pod to enter ErrImagePull or ImagePullBackOff"
 
     # 4. Sync real cluster state after failure
-    collector.sync_all("payments")
+    await collector.sync_all(live_temporal_store, "payments")
 
     # 5. Send Alertmanager Alert
-    now = datetime.now(UTC).isoformat()
+    alert_time = datetime.now(UTC) + timedelta(seconds=2)
     alert_payload = {
         "receiver": "heal-webhook",
         "status": "firing",
@@ -288,7 +304,7 @@ def test_real_cluster_t01_bad_image_rollback_flow(
                     "summary": "Deployment payments/payment-gateway rollout is stuck",
                     "description": f"ImagePullBackOff: Failed to pull image '{bad_image}'",
                 },
-                "startsAt": now,
+                "startsAt": alert_time.isoformat(),
                 "endsAt": "0001-01-01T00:00:00Z",
                 "fingerprint": "t01-real-cluster-fingerprint",
             }
@@ -325,7 +341,6 @@ def test_real_cluster_t01_bad_image_rollback_flow(
     }
     form_data = urllib.parse.urlencode({"payload": json.dumps(slack_payload)})
     headers = _compute_slack_headers(form_data.encode())
-    headers["Content-Type"] = "application/x-www-form-urlencoded"
 
     appr_resp = client.post(
         f"/api/v1/approval/interactive?approval_id={approval_id}",
@@ -347,7 +362,8 @@ def test_real_cluster_t01_bad_image_rollback_flow(
 
 
 @pytest.mark.skipif(not is_k8s_cluster_reachable(), reason="Live Kubernetes cluster not available")
-def test_real_cluster_t02_crashloop_rollback_flow(
+@pytest.mark.asyncio
+async def test_real_cluster_t02_crashloop_rollback_flow(
     client: TestClient,
     override_settings: None,
     live_temporal_store: TemporalStore,
@@ -356,10 +372,10 @@ def test_real_cluster_t02_crashloop_rollback_flow(
     """Scenario T-02 on REAL Cluster: CrashLoopBackOff triggers Tier A and verified rollback."""
     apps_api = get_real_cluster_apps_api()
     core_api = get_real_cluster_core_api()
-    collector = KubernetesCollector(temporal_store=live_temporal_store)
+    collector = KubernetesCollector()
 
     _ensure_baseline_healthy(apps_api, core_api)
-    collector.sync_all("payments")
+    await collector.sync_all(live_temporal_store, "payments")
 
     # Inject failure: exit 1 on startup
     patch_body = {
@@ -400,14 +416,14 @@ def test_real_cluster_t02_crashloop_rollback_flow(
                     break
         if crash_observed:
             break
-        time.sleep(1)
+        await asyncio.sleep(1)
 
     assert crash_observed, "Expected pod to enter CrashLoopBackOff or terminate with exit code 1"
 
-    collector.sync_all("payments")
+    await collector.sync_all(live_temporal_store, "payments")
 
     # Alert firing
-    now = datetime.now(UTC).isoformat()
+    alert_time = datetime.now(UTC) + timedelta(seconds=2)
     alert_payload = {
         "receiver": "heal-webhook",
         "status": "firing",
@@ -425,7 +441,7 @@ def test_real_cluster_t02_crashloop_rollback_flow(
                     "summary": "Pod payment-gateway is crash-looping",
                     "description": "Container failed with exit code 1 immediately on startup",
                 },
-                "startsAt": now,
+                "startsAt": alert_time.isoformat(),
                 "endsAt": "0001-01-01T00:00:00Z",
                 "fingerprint": "t02-real-cluster-fingerprint",
             }
@@ -451,7 +467,6 @@ def test_real_cluster_t02_crashloop_rollback_flow(
     }
     form_data = urllib.parse.urlencode({"payload": json.dumps(slack_payload)})
     headers = _compute_slack_headers(form_data.encode())
-    headers["Content-Type"] = "application/x-www-form-urlencoded"
 
     appr_resp = client.post(
         f"/api/v1/approval/interactive?approval_id={approval_id}",
@@ -463,7 +478,8 @@ def test_real_cluster_t02_crashloop_rollback_flow(
 
 
 @pytest.mark.skipif(not is_k8s_cluster_reachable(), reason="Live Kubernetes cluster not available")
-def test_real_cluster_t04_failing_readiness_rollback_flow(
+@pytest.mark.asyncio
+async def test_real_cluster_t04_failing_readiness_rollback_flow(
     client: TestClient,
     override_settings: None,
     live_temporal_store: TemporalStore,
@@ -472,10 +488,10 @@ def test_real_cluster_t04_failing_readiness_rollback_flow(
     """Scenario T-04 on REAL Cluster: Failing readiness probe triggers Tier A and rollback."""
     apps_api = get_real_cluster_apps_api()
     core_api = get_real_cluster_core_api()
-    collector = KubernetesCollector(temporal_store=live_temporal_store)
+    collector = KubernetesCollector()
 
     _ensure_baseline_healthy(apps_api, core_api)
-    collector.sync_all("payments")
+    await collector.sync_all(live_temporal_store, "payments")
 
     # Inject failure: bad readiness probe path
     patch_body = {
@@ -507,13 +523,13 @@ def test_real_cluster_t04_failing_readiness_rollback_flow(
         if (d.status.ready_replicas or 0) < 3:
             readiness_failed = True
             break
-        time.sleep(1)
+        await asyncio.sleep(1)
 
     assert readiness_failed, "Expected deployment ready replicas to drop below 3"
 
-    collector.sync_all("payments")
+    await collector.sync_all(live_temporal_store, "payments")
 
-    now = datetime.now(UTC).isoformat()
+    alert_time = datetime.now(UTC) + timedelta(seconds=2)
     alert_payload = {
         "receiver": "heal-webhook",
         "status": "firing",
@@ -531,7 +547,7 @@ def test_real_cluster_t04_failing_readiness_rollback_flow(
                     "summary": "Deployment payments/payment-gateway has 0/3 ready replicas",
                     "description": "Readiness probe failed with 404",
                 },
-                "startsAt": now,
+                "startsAt": alert_time.isoformat(),
                 "endsAt": "0001-01-01T00:00:00Z",
                 "fingerprint": "t04-real-cluster-fingerprint",
             }
@@ -557,7 +573,6 @@ def test_real_cluster_t04_failing_readiness_rollback_flow(
     }
     form_data = urllib.parse.urlencode({"payload": json.dumps(slack_payload)})
     headers = _compute_slack_headers(form_data.encode())
-    headers["Content-Type"] = "application/x-www-form-urlencoded"
 
     appr_resp = client.post(
         f"/api/v1/approval/interactive?approval_id={approval_id}",

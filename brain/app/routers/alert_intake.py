@@ -271,7 +271,15 @@ async def ingest_alertmanager_alert(
         c for c in entity_changes
         if c.change_type == "REVISION_REGISTERED" or "revision" in c.after_state
     ]
-    is_first_revision = len(rs_records) <= 1
+    current_rev_str = (
+        rs_records[-1].after_state.get("revision", "1") if rs_records else "1"
+    )
+    try:
+        current_rev = int(current_rev_str)
+    except (ValueError, TypeError):
+        current_rev = 1
+
+    is_first_revision = len(rs_records) <= 1 and current_rev <= 1
     target_revision_exists = not is_first_revision
 
     # Quiet system (R6)
