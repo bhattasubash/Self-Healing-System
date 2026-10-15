@@ -136,7 +136,9 @@ def live_approval_registry(tmp_path: Path) -> Generator[SQLiteApprovalRegistry, 
     db_path = str(tmp_path / "live_approval_test.db")
     reg = SQLiteApprovalRegistry(db_path=db_path)
     from app.routers import approval
+
     approval._GLOBAL_APPROVAL_REGISTRY = reg
+    app.dependency_overrides[approval.get_approval_registry] = lambda: reg
     yield reg
     reg.close()
 

@@ -146,7 +146,18 @@ jobs:
 
       - name: Run real cluster test suite (T-01, T-02, T-04)
         run: |
-          pytest -v lab/test_real_cluster.py
+          pytest -v -s lab/test_real_cluster.py --tb=short 2>&1 | tee test_results.txt || (
+            echo "### Real Cluster Test Output" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            cat test_results.txt >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            echo "### Cluster Diagnostics" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            kubectl get pods,rs,deploy -n payments -o wide >> $GITHUB_STEP_SUMMARY
+            kubectl describe deployment payment-gateway -n payments >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            exit 1
+          )
 
       - name: Run end-to-end real cluster demo
         run: |

@@ -268,7 +268,16 @@ class KubernetesRollbackExecutor:
 
         # Fail-closed action execution gated by audit log
         def _apply_rollback() -> str:
-            patch_body = {"spec": {"template": target_template}}
+            target_dict = (
+                api.api_client.sanitize_for_serialization(target_template)
+                if hasattr(api, "api_client")
+                else target_template
+            )
+            if isinstance(target_dict, dict) and "metadata" in target_dict:
+                meta = target_dict.get("metadata") or {}
+                if isinstance(meta, dict) and "labels" in meta and isinstance(meta["labels"], dict):
+                    meta["labels"].pop("pod-template-hash", None)
+            patch_body = {"spec": {"template": target_dict}}
             api.patch_namespaced_deployment(
                 name=envelope.target_name,
                 namespace=envelope.namespace,
@@ -317,7 +326,16 @@ class KubernetesRollbackExecutor:
             deployment=envelope.target_name,
         )
 
-        undo_body = {"spec": {"template": current_template}}
+        current_dict = (
+            api.api_client.sanitize_for_serialization(current_template)
+            if hasattr(api, "api_client")
+            else current_template
+        )
+        if isinstance(current_dict, dict) and "metadata" in current_dict:
+            meta = current_dict.get("metadata") or {}
+            if isinstance(meta, dict) and "labels" in meta and isinstance(meta["labels"], dict):
+                meta["labels"].pop("pod-template-hash", None)
+        undo_body = {"spec": {"template": current_dict}}
         api.patch_namespaced_deployment(
             name=envelope.target_name,
             namespace=envelope.namespace,
