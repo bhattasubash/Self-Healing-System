@@ -266,9 +266,18 @@ async def run_demo() -> dict[str, Any]:
 
     # Step 7: Verify cluster state
     print("\n[Step 7] Verifying live cluster state post-rollback...")
-    final_deploy = apps_api.read_namespaced_deployment(name="payment-gateway", namespace="payments")
-    restored_img = final_deploy.spec.template.spec.containers[0].image
-    ready = final_deploy.status.ready_replicas
+    restored_img = ""
+    ready = 0
+    for _ in range(45):
+        final_deploy = apps_api.read_namespaced_deployment(
+            name="payment-gateway", namespace="payments"
+        )
+        restored_img = final_deploy.spec.template.spec.containers[0].image
+        ready = final_deploy.status.ready_replicas or 0
+        if restored_img == "hashicorp/http-echo:0.2.3" and ready == 3:
+            break
+        await asyncio.sleep(1)
+
     print(f"  Restored Image: {restored_img}")
     print(f"  Ready Replicas: {ready}/3")
     assert restored_img == "hashicorp/http-echo:0.2.3"

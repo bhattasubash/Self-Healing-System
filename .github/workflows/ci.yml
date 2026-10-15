@@ -161,5 +161,11 @@ jobs:
 
       - name: Run end-to-end real cluster demo
         run: |
-          python lab/run_real_cluster_demo.py
+          python lab/run_real_cluster_demo.py 2>&1 | tee demo_output.txt || (
+            echo "### Demo Failure Output" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            cat demo_output.txt >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            exit 1
+          )
 
