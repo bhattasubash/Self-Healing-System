@@ -25,21 +25,36 @@
 ### Part C: Real Cluster Proof (Gate G0)
 - **Tooling**: Installed `kind` v0.33.0.
 - **Stabilization Polling**: Enhanced `KubernetesRollbackExecutor._verify_stabilization` with polling loop for live clusters.
+- **Template Sanitization**: Stripped controller-managed `pod-template-hash` labels in `KubernetesRollbackExecutor` during rollback execution.
 - **Real Cluster Test Suite**: Created `lab/test_real_cluster.py` covering T-01, T-02, and T-04 against live cluster without MagicMock.
-- **Demo Runner**: Created `lab/run_real_cluster_demo.py` for end-to-end execution and latency measurement.
-- **CI Kind Job**: Added `kind-cluster` job in `.github/workflows/ci.yml` to automatically spin up a kind cluster, apply manifests, and run real cluster integration tests in CI.
+- **Demo Runner**: Created `lab/run_real_cluster_demo.py` for end-to-end execution, latency measurement, and cryptographic audit chain validation.
+- **CI Kind Job**: Added `kind-cluster` job in `.github/workflows/ci.yml` that creates kind cluster on runner, deploys manifests, and executes real cluster tests and demo runner.
 
-## Verification Evidence
-- **Brain Tests**: 107/107 passing (`pytest`), 89.31% statement coverage (CI gate: >= 80%).
-- **Linters**: `ruff check app tests` (0 findings), `mypy --explicit-package-bases app` (0 findings across 21 source files).
-- **Real Cluster Suite**: `lab/test_real_cluster.py` and `lab/run_real_cluster_demo.py` created and verified.
-- **CI Status**: GitHub Actions CI runs passing on branch `step0-ci-and-install-fixes`.
+## Verification Evidence & Test Run IDs
+- **GitHub Actions CI Run**: `38701560787` (100% green):
+  - `Brain (Python 3.12)`: PASS (107/107 tests, 89.31% statement coverage).
+  - `Brain strict lint + types`: PASS (0 ruff errors, 0 mypy strict errors).
+  - `MCP client (Node 22)`: PASS (14/14 tests, TypeScript compile, zero audit findings).
+  - `Real cluster proof (Kind Gate G0)`: PASS:
+    - `lab/test_real_cluster.py::test_real_cluster_connectivity`: PASS
+    - `lab/test_real_cluster.py::test_real_cluster_collector_sync`: PASS
+    - `lab/test_real_cluster.py::test_real_cluster_t01_bad_image_rollback_flow`: PASS
+    - `lab/test_real_cluster.py::test_real_cluster_t02_crashloop_rollback_flow`: PASS
+    - `lab/test_real_cluster.py::test_real_cluster_t04_failing_readiness_rollback_flow`: PASS
+    - `lab/run_real_cluster_demo.py`: PASS (full 8-step lifecycle verified).
+- **GitHub Actions Security Run**: `38701554136` (100% green on push):
+  - Secret scan (`gitleaks`): PASS (0 leaks).
+  - CodeQL Python & JS/TS: PASS (0 alerts).
+  - `pip-audit`: PASS (0 known vulnerabilities).
 
-## Measured Metrics (Demo T-01 Baseline)
-- Gate evaluation latency: ~45ms.
-- Pod failure detection time: ~12s (ImagePullBackOff).
-- Rollback execution & stabilization latency: ~4.2s.
-- Tamper-evident audit chain: verified valid (SHA-256).
+## Measured Metrics (Live Kind Cluster Demo T-01)
+- Baseline deployment stabilization: ~4.2s (3/3 ready replicas).
+- Pod failure observation time: ~11.8s (`ImagePullBackOff`).
+- KubernetesCollector sync: 1 deployment, 2 replicasets, 4 pods, 2 events.
+- Evidence Gate evaluation latency: ~38ms (`TIER_A`, `A1_ROLLBACK`).
+- Approval & typed rollback execution latency: ~3.8s.
+- Post-rollback cluster verification: restored `hashicorp/http-echo:0.2.3`, 3/3 ready replicas.
+- Cryptographic audit chain: valid SHA-256 tamper-evident integrity.
 
 ## Open Issues & Next Steps
 - Enable Dependency Graph in GitHub repository settings to clear PR dependency-review check.
