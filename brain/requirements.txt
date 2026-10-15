@@ -210,7 +210,7 @@ protobuf-py==0.1.1
     # via
     #   connectrpc
     #   e2b
-protobuf-py-ext==0.1.1
+protobuf-py-ext==0.6.0
     # via protobuf-py
 pyarrow==26.0.0
     # via self-healing-brain (pyproject.toml)
