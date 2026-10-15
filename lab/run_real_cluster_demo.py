@@ -186,6 +186,8 @@ async def run_demo() -> dict[str, Any]:
     settings.slack.signing_secret = SecretStr(DEMO_SLACK_SECRET)
     settings.slack.allowed_approver_roles = ["sre-lead"]
     settings.slack.approver_role_mapping = {"U_SRE_LEAD": "sre-lead"}
+    settings.kubernetes.allowed_namespaces = ["payments", "default"]
+    settings.kubernetes.collector_enabled = False
     app.dependency_overrides[get_settings] = lambda: settings
 
     t_gate = time.time()

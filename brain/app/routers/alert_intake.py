@@ -282,6 +282,16 @@ async def ingest_alertmanager_alert(
     is_first_revision = len(rs_records) <= 1 and current_rev <= 1
     target_revision_exists = not is_first_revision
 
+    # Check for migration markers on changes / ReplicaSets
+    has_irreversible_migration = any(
+        c.after_state.get("has_irreversible_migration", False)
+        or c.after_state.get("labels", {}).get("migration") == "true"
+        or c.after_state.get("annotations", {}).get("migration") == "true"
+        or c.after_state.get("labels", {}).get("schema-migration") == "true"
+        or c.after_state.get("annotations", {}).get("schema-migration") == "true"
+        for c in entity_changes
+    )
+
     # Quiet system (R6)
     latest_change = entity_changes[-1] if entity_changes else None
     rollout_in_flight = bool(
@@ -295,10 +305,21 @@ async def ingest_alertmanager_alert(
     recent_rollback_in_30m = len(recent_rollbacks) > 0
 
     # Policy & GitOps (R7, R8)
-    local_policy_allowed = namespace in {"default", "payments", "orders"}
+    local_policy_allowed = namespace in settings.kubernetes.allowed_namespaces
     is_gitops_managed = bool(
         latest_change and latest_change.after_state.get("is_gitops_managed", False)
     )
+
+    # Freshness Check
+    latest_obs_time = _temporal_store.get_latest_observation_time()
+    now_utc = datetime.now(UTC)
+    if latest_obs_time and latest_obs_time.tzinfo is None:
+        latest_obs_time = latest_obs_time.replace(tzinfo=UTC)
+    if latest_obs_time is None:
+        telemetry_fresh = True
+    else:
+        obs_age = (now_utc - latest_obs_time).total_seconds()
+        telemetry_fresh = obs_age <= settings.kubernetes.freshness_threshold_seconds
 
     # Evaluate Deterministic Evidence Gate (R1-R8)
     gate_ctx = EvidenceGateContext(
@@ -313,10 +334,12 @@ async def ingest_alertmanager_alert(
         has_history=has_history,
         target_revision_exists=target_revision_exists,
         is_first_revision=is_first_revision,
+        has_irreversible_migration=has_irreversible_migration,
         rollout_in_flight=rollout_in_flight,
         recent_rollback_in_30m=recent_rollback_in_30m,
         local_policy_allowed=local_policy_allowed,
         is_gitops_managed=is_gitops_managed,
+        telemetry_fresh=telemetry_fresh,
     )
 
     gate_result = _evidence_gate.evaluate(gate_ctx)

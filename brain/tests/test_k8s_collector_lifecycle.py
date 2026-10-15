@@ -13,18 +13,17 @@ Verifies:
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime, timedelta
 import threading
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
-from app.config import Settings
+
 from app.services.evidence_gate import (
     EvidenceGate,
     EvidenceGateContext,
     EvidenceTier,
-    RemediationActionType,
 )
 from app.services.k8s_collector import KubernetesCollector
 from app.services.temporal_store import EntityRecord, ObservationRecord, TemporalStore
@@ -44,7 +43,12 @@ async def test_collector_freshness_check_caps_tier_at_b(store: TemporalStore) ->
     stale_time = now - timedelta(seconds=300)  # 5 minutes old (stale)
 
     # Record baseline entity and observation with old timestamp
-    ent = EntityRecord(uid="deploy-stale-01", kind="Deployment", namespace="payments", name="payment-gateway")
+    ent = EntityRecord(
+        uid="deploy-stale-01",
+        kind="Deployment",
+        namespace="payments",
+        name="payment-gateway",
+    )
     await store.record_entity(ent)
     obs = ObservationRecord(
         entity_uid="deploy-stale-01",
@@ -84,7 +88,9 @@ async def test_collector_freshness_check_caps_tier_at_b(store: TemporalStore) ->
 
 
 @pytest.mark.asyncio
-async def test_collector_watches_off_event_loop_and_handles_410_reconnect(store: TemporalStore) -> None:
+async def test_collector_watches_off_event_loop_and_handles_410_reconnect(
+    store: TemporalStore,
+) -> None:
     """Collector runs blocking watches off the event loop and recovers from HTTP 410 Gone."""
     mock_apps = MagicMock()
     collector = KubernetesCollector(apps_api=mock_apps, core_api=MagicMock())
@@ -94,14 +100,16 @@ async def test_collector_watches_off_event_loop_and_handles_410_reconnect(store:
 
     # Simulate watch stream that yields 410 Gone error once, then normal event
     call_count = 0
+
     def fake_stream(*args: Any, **kwargs: Any) -> Any:
         nonlocal call_count, reconnect_occurred
         call_count += 1
         if call_count == 1:
             # Simulate Kubernetes 410 Expired / GoneApiException
-            class FakeApiException(Exception):
+            class FakeApiError(Exception):
                 status = 410
-            raise FakeApiException("410 Gone: resourceVersion too old")
+
+            raise FakeApiError("410 Gone: resourceVersion too old")
         reconnect_occurred = True
         stop_event.set()
         return []

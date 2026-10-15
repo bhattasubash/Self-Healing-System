@@ -5,13 +5,13 @@ SQLite state tracking, and background notification.
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import hmac
 import json
 import time
 import urllib.parse
-from unittest.mock import AsyncMock, MagicMock, patch
+from typing import TYPE_CHECKING
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -20,10 +20,11 @@ from pydantic import SecretStr
 from app.config import Settings, get_settings
 from app.main import app
 from app.routers.approval import get_approval_registry
-from app.services.approval_store import ApprovalRecord
 
+if TYPE_CHECKING:
+    from app.services.approval_store import ApprovalRecord
 
-TEST_SIGNING_SECRET = "slack_async_test_secret_999"
+TEST_SIGNING_SECRET = "slack_async_test_secret_999"  # noqa: S105
 
 
 def _compute_slack_headers(body: bytes, secret: str = TEST_SIGNING_SECRET) -> dict[str, str]:
@@ -42,7 +43,8 @@ def client() -> TestClient:
     return TestClient(app)
 
 
-def test_approval_endpoint_acknowledges_within_3s_with_slow_executor(client: TestClient) -> None:
+@pytest.mark.asyncio
+async def test_approval_endpoint_acknowledges_within_3s_with_slow_executor() -> None:
     """Approval endpoint acknowledges Slack within < 3 seconds while rollback runs in background."""
     registry = get_approval_registry()
     registry.clear()
@@ -87,13 +89,24 @@ def test_approval_endpoint_acknowledges_within_3s_with_slow_executor(client: Tes
         headers = _compute_slack_headers(form_body)
 
         start_time = time.perf_counter()
-        with patch("app.routers.approval.execute_k8s_rollback_from_approval", side_effect=slow_rollback), \
-             patch("app.routers.approval._post_slack_update", new=mock_notify):
-            resp = client.post(
-                "/api/v1/approval/interactive",
-                content=form_body,
-                headers=headers,
-            )
+        rollback_mock = patch(
+            "app.routers.approval.execute_k8s_rollback_from_approval",
+            side_effect=slow_rollback,
+        )
+        notify_mock = patch(
+            "app.routers.approval._post_slack_update",
+            new=mock_notify,
+        )
+        with rollback_mock, notify_mock:
+            import httpx
+
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(transport=transport, base_url="http://test") as ac:
+                resp = await ac.post(
+                    "/api/v1/approval/interactive",
+                    content=form_body,
+                    headers=headers,
+                )
         elapsed = time.perf_counter() - start_time
 
         # Fast acknowledgment requirement: MUST return in under 3.0s (in fact < 0.5s)

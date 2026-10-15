@@ -3,13 +3,14 @@ Tests for strict namespace allowlist enforcement in KubernetesRollbackExecutor.
 
 Verifies:
 1. Executor fails closed (PreconditionFailedError) when target namespace is not in allowlist.
-2. Even when EvidenceGate is completely bypassed, executor refuses direct rollback on unlisted namespace.
+2. Even when EvidenceGate is bypassed, executor refuses rollback on unlisted namespace.
 3. Allowlist defaults to empty (default deny) unless loaded from settings or explicitly provided.
 """
 
 from __future__ import annotations
 
 from unittest.mock import MagicMock
+
 import pytest
 
 from app.services.audit_logger import AuditLogger
@@ -30,7 +31,7 @@ def audit_logger() -> AuditLogger:
 def test_executor_refuses_unallowlisted_namespace_even_if_gate_bypassed(
     audit_logger: AuditLogger,
 ) -> None:
-    """When an actor directly calls execute_rollback bypassing the gate, executor refuses unlisted namespace."""
+    """When an actor calls execute_rollback directly, executor refuses unlisted namespace."""
     mock_apps = MagicMock()
     # Configure executor with only 'payments' allowlisted
     executor = KubernetesRollbackExecutor(

@@ -54,7 +54,7 @@ class ChangeRecord(BaseModel):
     valid_from: datetime
     valid_to: datetime | None = None
     recorded_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
-    source: str = "k8s_informer"
+    source: str = "k8s_collector"
     actor: str = "system"
 
 
@@ -402,6 +402,17 @@ class TemporalStore:
                 )
                 for row in rows
             ]
+
+    def get_latest_observation_time(self) -> datetime | None:
+        """Returns the most recent observation timestamp recorded in the store."""
+        with self._get_connection() as conn:
+            row = conn.execute("SELECT MAX(timestamp) as latest FROM observations").fetchone()
+            if row and row["latest"]:
+                try:
+                    return datetime.fromisoformat(row["latest"])
+                except Exception:
+                    return None
+            return None
 
     # ── 4. Bi-Temporal Query: state_at ──
 
