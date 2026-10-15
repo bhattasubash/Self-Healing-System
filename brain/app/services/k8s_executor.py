@@ -206,21 +206,45 @@ class KubernetesRollbackExecutor:
         )
         return "\n".join(diff_lines)
 
-    def _verify_stabilization(self, namespace: str, deployment_name: str) -> bool:
+    def _verify_stabilization(
+        self,
+        namespace: str,
+        deployment_name: str,
+        timeout_seconds: int = 60,
+        interval_seconds: float = 1.0,
+    ) -> bool:
         """Verifies that the rolled-back deployment stabilizes with all replicas ready."""
-        try:
-            api = self._get_api()
-            deploy = api.read_namespaced_deployment(name=deployment_name, namespace=namespace)
-            status = getattr(deploy, "status", None)
-            if status is None:
-                return False
-            replicas = getattr(status, "replicas", 0)
-            updated = getattr(status, "updated_replicas", 0)
-            ready = getattr(status, "ready_replicas", 0)
-            unavailable = getattr(status, "unavailable_replicas", 0) or 0
-            return (updated == replicas) and (ready == replicas) and (unavailable == 0)
-        except Exception:
-            return False
+        import time
+
+        start_time = time.time()
+        while True:
+            try:
+                api = self._get_api()
+                deploy = api.read_namespaced_deployment(name=deployment_name, namespace=namespace)
+                status = getattr(deploy, "status", None)
+                if status is not None:
+                    replicas = getattr(status, "replicas", 0)
+                    updated = getattr(status, "updated_replicas", 0)
+                    ready = getattr(status, "ready_replicas", 0)
+                    unavailable = getattr(status, "unavailable_replicas", 0) or 0
+                    if (
+                        replicas > 0
+                        and (updated == replicas)
+                        and (ready == replicas)
+                        and (unavailable == 0)
+                    ):
+                        return True
+            except Exception as exc:
+                self._log.debug(
+                    "stabilization_poll_waiting",
+                    deployment=deployment_name,
+                    error=str(exc),
+                )
+
+            if time.time() - start_time >= timeout_seconds:
+                break
+            time.sleep(interval_seconds)
+        return False
 
     def execute_rollback(self, envelope: ActionEnvelope) -> RollbackResult:
         """
