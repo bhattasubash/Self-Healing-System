@@ -1,0 +1,11 @@
+title = "Project Heal gitleaks config"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Fake secrets used as test fixtures"
+paths = [
+  '''brain/tests/test_approval_router\.py''',
+  '''brain/tests/test_content_scanner\.py''',
+]

@@ -61,7 +61,8 @@ jobs:
       - name: Audit resolved dependencies
         run: |
           python -m pip install --upgrade pip pip-audit
-          pip install -e "./brain[dev]"
+          pip install -r "./brain/requirements.txt"
+          pip install --no-deps -e "./brain"
           pip-audit --skip-editable --progress-spinner off
 
   dependency-review:

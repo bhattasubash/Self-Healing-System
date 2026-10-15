@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: ["**"]
+    branches: [main]
   pull_request:
 
 # Least privilege: CI only needs to read the repo.
@@ -29,12 +29,13 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
-          cache-dependency-path: brain/pyproject.toml
+          cache-dependency-path: brain/requirements.txt
 
-      - name: Install
+      - name: Install (from lockfile)
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[dev]"
+          pip install -r requirements.txt
+          pip install --no-deps -e .
 
       # REQUIRED: correctness + security rules (syntax errors, undefined names, bandit rules).
       - name: Lint (required rules)
@@ -67,10 +68,12 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
-          cache-dependency-path: brain/pyproject.toml
-      - run: |
+          cache-dependency-path: brain/requirements.txt
+      - name: Install (from lockfile)
+        run: |
           python -m pip install --upgrade pip
-          pip install -e ".[dev]"
+          pip install -r requirements.txt
+          pip install --no-deps -e .
       - name: Ruff (full rule set)
         run: ruff check app tests
       - name: Mypy (strict)
