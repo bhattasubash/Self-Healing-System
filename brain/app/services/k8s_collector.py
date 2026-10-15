@@ -1,5 +1,5 @@
 """
-Kubernetes Informer & Collector Service for Temporal Store (PRD Section 8, F-04).
+Kubernetes Collector & Watcher Service for Temporal Store (PRD Section 8, F-04).
 
 Discovers cluster resources and populates the SQLite bi-temporal engine:
 - Deployments (spec, revisions, replicas, images, rollout state)
@@ -12,8 +12,12 @@ Discovers cluster resources and populates the SQLite bi-temporal engine:
 from __future__ import annotations
 
 import asyncio
+import time
 from datetime import UTC, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    import threading
 
 import structlog
 
@@ -446,3 +450,98 @@ class KubernetesCollector:
             "events": len(events),
             "hpas": len(hpas),
         }
+
+    def is_telemetry_fresh(
+        self, temporal_store: TemporalStore, threshold_seconds: int = 120
+    ) -> bool:
+        """Checks if recent observation telemetry exists within the freshness threshold window."""
+        latest = temporal_store.get_latest_observation_time()
+        if not latest:
+            return False
+        # Normalize timezone awareness
+        now = datetime.now(UTC)
+        if latest.tzinfo is None:
+            latest = latest.replace(tzinfo=UTC)
+        age = (now - latest).total_seconds()
+        return age <= threshold_seconds
+
+    async def sync_namespaces(
+        self, temporal_store: TemporalStore, namespaces: list[str]
+    ) -> dict[str, int]:
+        """Synchronizes Kubernetes resources only for specified allowlisted namespaces."""
+        totals = {"deployments": 0, "replica_sets": 0, "pods": 0, "events": 0, "hpas": 0}
+        for ns in namespaces:
+            res = await self.sync_all(temporal_store, namespace=ns)
+            for k, v in res.items():
+                totals[k] += v
+        return totals
+
+    async def run_watches_in_background(
+        self,
+        temporal_store: TemporalStore,
+        namespaces: list[str],
+        stop_event: threading.Event,
+        poll_fallback_seconds: float = 15.0,
+    ) -> None:
+        """
+        Runs blocking Kubernetes watches off the asyncio event loop using worker threads.
+        Handles 410 Gone / resourceVersion expiration, automatic reconnects,
+        and watches only allowlisted namespaces.
+        """
+        def _watch_loop() -> None:
+            self._ensure_apis()
+            if not self.apps_api or not self.core_api:
+                return
+
+            from kubernetes import watch
+
+            w = watch.Watch()  # type: ignore[no-untyped-call]
+            for ns in namespaces:
+                if stop_event.is_set():
+                    break
+                resource_version: str | None = None
+                while not stop_event.is_set():
+                    try:
+                        kwargs: dict[str, Any] = {
+                            "timeout_seconds": int(max(poll_fallback_seconds, 1))
+                        }
+                        if resource_version:
+                            kwargs["resource_version"] = resource_version
+                        for event in w.stream(  # type: ignore[no-untyped-call]
+                            self.apps_api.list_namespaced_deployment,
+                            namespace=ns,
+                            **kwargs,
+                        ):
+                            if stop_event.is_set():
+                                break
+                            raw_obj = (
+                                event.get("object")
+                                if isinstance(event, dict)
+                                else getattr(event, "object", None)
+                            )
+                            if raw_obj:
+                                meta = getattr(raw_obj, "metadata", None)
+                                if meta and hasattr(meta, "resource_version"):
+                                    resource_version = meta.resource_version
+                        if stop_event.is_set():
+                            break
+                    except Exception as exc:
+                        # Handle 410 Gone / expired resourceVersion
+                        status_code = getattr(exc, "status", None)
+                        is_expired = (
+                            status_code == 410 or "410" in str(exc) or "expired" in str(exc).lower()
+                        )
+                        if is_expired:
+                            self._log.info(
+                                "watch_resource_version_expired_resetting", error=str(exc)
+                            )
+                            resource_version = None
+                        else:
+                            self._log.warning(
+                                "watch_stream_interrupted_reconnecting", error=str(exc)
+                            )
+                        if stop_event.is_set():
+                            break
+                        time.sleep(0.1)
+
+        await asyncio.to_thread(_watch_loop)

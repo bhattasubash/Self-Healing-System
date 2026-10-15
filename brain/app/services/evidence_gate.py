@@ -74,6 +74,7 @@ class EvidenceGateContext:
     local_policy_allowed: bool = True
     freeze_window_active: bool = False
     is_gitops_managed: bool = False
+    telemetry_fresh: bool = True
 
 
 @dataclass
@@ -174,32 +175,45 @@ class EvidenceGate:
         )
 
         # ── R4: Baseline and corroboration ──
-        r4_passed = (
-            ctx.has_history
-            and ctx.previous_revision_healthy
-            and ctx.previous_revision_duration_minutes >= 30.0
-            and ctx.independent_signals_count >= 2
-        )
-        if not ctx.has_history:
-            r4_details = "No prior observation history recorded for workload (Tier capped at B)."
-            unknowns.append("Missing prior observation history")
-        elif not ctx.previous_revision_healthy:
-            r4_details = "Previous revision was also unhealthy; cannot guarantee safe rollback."
-        elif ctx.previous_revision_duration_minutes < 30.0:
+        if not ctx.telemetry_fresh:
+            r4_passed = False
             r4_details = (
-                f"Previous revision ran for only {ctx.previous_revision_duration_minutes:.1f}m "
-                f"(< 30m baseline)."
+                "Collector telemetry is stale. Corroboration and baseline "
+                "unverified (Tier capped at B)."
             )
-        elif ctx.independent_signals_count < 2:
-            r4_details = (
-                f"Only {ctx.independent_signals_count} independent signal agrees (< 2 required)."
-            )
-            unknowns.append("Corroborating secondary telemetry signal absent")
+            unknowns.append("Stale collector telemetry")
         else:
-            r4_details = (
-                f"Previous revision was healthy for {ctx.previous_revision_duration_minutes:.1f}m; "
-                f"{ctx.independent_signals_count} independent signals corroborate incident."
+            r4_passed = (
+                ctx.has_history
+                and ctx.previous_revision_healthy
+                and ctx.previous_revision_duration_minutes >= 30.0
+                and ctx.independent_signals_count >= 2
             )
+            if not ctx.has_history:
+                r4_details = (
+                    "No prior observation history recorded for workload "
+                    "(Tier capped at B)."
+                )
+                unknowns.append("Missing prior observation history")
+            elif not ctx.previous_revision_healthy:
+                r4_details = "Previous revision was also unhealthy; cannot guarantee safe rollback."
+            elif ctx.previous_revision_duration_minutes < 30.0:
+                r4_details = (
+                    f"Previous revision ran for only {ctx.previous_revision_duration_minutes:.1f}m "
+                    f"(< 30m baseline)."
+                )
+            elif ctx.independent_signals_count < 2:
+                r4_details = (
+                    f"Only {ctx.independent_signals_count} independent signal agrees "
+                    f"(< 2 required)."
+                )
+                unknowns.append("Corroborating secondary telemetry signal absent")
+            else:
+                r4_details = (
+                    f"Previous revision was healthy for "
+                    f"{ctx.previous_revision_duration_minutes:.1f}m; "
+                    f"{ctx.independent_signals_count} independent signals corroborate incident."
+                )
         evaluations.append(
             RuleEvaluation(
                 rule_id="R4",

@@ -11,8 +11,10 @@ Provides the orchestration brain runtime:
 
 from __future__ import annotations
 
+import asyncio
 import sys
-from contextlib import asynccontextmanager
+import threading
+from contextlib import asynccontextmanager, suppress
 from typing import TYPE_CHECKING
 
 import structlog
@@ -62,12 +64,55 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         host=settings.brain_host,
         port=settings.brain_port,
         temporal_store_db=settings.temporal_store.db_path,
+        collector_enabled=settings.kubernetes.collector_enabled,
     )
+
+    collector_task: asyncio.Task[None] | None = None
+    stop_event = threading.Event()
+
+    if settings.kubernetes.collector_enabled:
+        from app.services.k8s_collector import KubernetesCollector
+        from app.services.temporal_store import TemporalStore
+
+        store = TemporalStore(db_path=settings.temporal_store.db_path)
+        collector = KubernetesCollector()
+        interval = settings.kubernetes.collector_interval_seconds
+        allowed_ns = settings.kubernetes.allowed_namespaces
+
+        async def _collector_worker() -> None:
+            logger.info(
+                "k8s_collector_background_worker_started",
+                interval=interval,
+                namespaces=allowed_ns,
+            )
+            while not stop_event.is_set():
+                try:
+                    if allowed_ns:
+                        await collector.sync_namespaces(store, allowed_ns)
+                    else:
+                        await collector.sync_all(store)
+                except Exception as exc:
+                    logger.warning("k8s_collector_reconcile_error", error=str(exc))
+
+                # Sleep in short increments to respond promptly to stop_event
+                for _ in range(int(interval * 10)):
+                    if stop_event.is_set():
+                        break
+                    await asyncio.sleep(0.1)
+
+            logger.info("k8s_collector_background_worker_stopped")
+
+        collector_task = asyncio.create_task(_collector_worker())
 
     # Yield control to the running application
     yield
 
     logger.info("brain_shutting_down")
+    stop_event.set()
+    if collector_task:
+        collector_task.cancel()
+        with suppress(TimeoutError, asyncio.CancelledError):
+            await asyncio.wait_for(collector_task, timeout=5.0)
 
 
 # ─── Application Factory ───────────────────────────────────────────────

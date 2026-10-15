@@ -72,6 +72,8 @@ def override_test_settings() -> Generator[None, None, None]:
         s.slack.signing_secret = SecretStr(DUMMY_SLACK_SIGNING_KEY)
         s.slack.allowed_approver_roles = ["sre-lead", "incident-commander", "admin"]
         s.slack.approver_role_mapping = {"U12345678": "sre-lead"}
+        s.kubernetes.allowed_namespaces = ["payments", "default"]
+        s.kubernetes.collector_enabled = False
         return s
 
     app.dependency_overrides[get_settings] = _settings_override
@@ -407,6 +409,8 @@ async def test_slack_card_dispatched_only_after_successful_response(
         s.alert.auth_token = SecretStr(TEST_ALERT_TOKEN)
         s.slack.bot_token = SecretStr("xoxb-dummy-test-token")
         s.slack.approval_channel = "C12345678"
+        s.kubernetes.allowed_namespaces = ["payments", "default"]
+        s.kubernetes.collector_enabled = False
         return s
 
     app.dependency_overrides[get_settings] = _slack_settings
@@ -513,8 +517,62 @@ async def test_full_live_path_approve_to_verified_rollback(
         resp_data = resp.json()
         assert resp_data["decision"] == "approved"
         assert resp_data["status"] == "PROCESSED"
-        assert resp_data["execution_status"] == "resolved"
+        assert resp_data["execution_status"] in ("in_progress", "resolved")
         assert resp_data["incident_id"] == incident_id
+
+
+@pytest.mark.asyncio
+async def test_alertmanager_unlisted_namespace_yields_no_action_tier_c(
+    client: TestClient, test_temporal_store: TemporalStore
+) -> None:
+    """An alert for unlisted namespace is denied by policy (Rule R7) and yields Tier C."""
+    now = datetime.now(UTC)
+    entity_uid = "deploy-unlisted-01"
+    await test_temporal_store.record_entity(
+        EntityRecord(
+            uid=entity_uid,
+            kind="Deployment",
+            namespace="forbidden-namespace",
+            name="secret-workload",
+        )
+    )
+    await test_temporal_store.record_change(
+        ChangeRecord(
+            entity_uid=entity_uid,
+            change_type="IMAGE_UPDATE",
+            summary="Update secret-workload to v2",
+            before_state={"revision": 1},
+            after_state={"revision": 2},
+            valid_from=now - timedelta(minutes=5),
+        )
+    )
+    await test_temporal_store.record_observation(
+        ObservationRecord(
+            entity_uid=entity_uid,
+            timestamp=now - timedelta(minutes=2),
+            metric_name="pod_status",
+            value=0.0,
+            status="unhealthy",
+        )
+    )
+
+    payload = _build_alertmanager_payload(
+        alertname="KubePodCrashLooping",
+        namespace="forbidden-namespace",
+        deployment="secret-workload",
+        starts_at=now - timedelta(minutes=2),
+    )
+
+    alert_resp = client.post(
+        "/api/v1/alerts/alertmanager",
+        json=payload,
+        headers={"Authorization": f"Bearer {TEST_ALERT_TOKEN}"},
+    )
+    assert alert_resp.status_code == 202
+    alert_data = alert_resp.json()
+    assert alert_data["tier"] == "TIER_C"
+    assert alert_data["proposed_action"] == "NO_ACTION"
+    assert alert_data["approval_id"] is None
 
 
 # ─── 8. Data Perimeter Rejects Secrets ────────────────────────────────

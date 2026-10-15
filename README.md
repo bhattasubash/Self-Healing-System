@@ -58,12 +58,12 @@ Every claim in Project Heal is tagged as **[M] Measured**, **[T] Target**, or **
 
 | Subject | Claim / Posture | PRD Replacement & Reality | Status |
 | --- | --- | --- | --- |
-| **Data Privacy** | Raw telemetry stays in your environment. | Only masked, minimized context leaves; you can preview every outbound payload. Server-side content scanner fails closed on unmasked secrets. | **[M]** 100% recall on 7-class synthetic secret test corpus |
-| **Production Safety** | Typed action allowlist with dry-run diff. | Sandboxes validate generated artifacts (manifests, policy tests), not production safety. Production safety comes from server-side dry-run diffs, policy gates, verification stabilization, and at most one automatic undo. | **[M]** 96 automated tests + 5 lab chaos tests green |
-| **Root Cause & Execution** | Deterministic Evidence Gate (Rules R1–R8). | Best LLMs achieve ~25% accuracy on root-cause analysis; therefore deterministic rules decide proposals. The LLM only explains, cites evidence IDs, and lists unknowns. No LLM-authored text is ever executed. | **[M]** Evaluated deterministically across T-01 to T-28 matrix |
-| **Telemetry History** | Relational bi-temporal change timeline. | Kubernetes events expire after 1 hour. Project Heal tracks change records with `valid_from`, `valid_to`, and `recorded_at` in an append-only relational SQLite store. | **[M]** Bi-temporal snapshot and diff verified |
-| **GitOps Awareness** | Argo CD & Flux automatic detection. | If automated sync / self-heal is active, direct Kubernetes rollback is blocked. The agent routes to an A2 GitOps revert PR instead. | **[M]** Argo CD instance label guard verified |
-| **Audit Integrity** | SHA-256 append-only hash chain. | Every triage decision, dry-run diff, human approval, execution, and verification result is hashed into an immutable chain. If an audit write fails, execution aborts. | **[M]** Tamper detection and fail-closed audit verified |
+| **Data Privacy** | Raw telemetry stays in your environment. | Only masked, minimized context leaves; you can preview every outbound payload. Server-side content scanner fails closed on unmasked secrets. | **[M]** 100% recall on 7-class synthetic secret test corpus ([Security Run #33](https://github.com/bhattasubash/Self-Healing-System/actions/runs/38731022820)) |
+| **Production Safety** | Typed action allowlist with dry-run diff. | Sandboxes validate generated artifacts (manifests, policy tests), not production safety. Production safety comes from server-side dry-run diffs, policy gates, verification stabilization, and at most one automatic undo. | **[M]** 107 brain unit tests + 5 live kind cluster tests verified ([CI Run #23](https://github.com/bhattasubash/Self-Healing-System/actions/runs/38731022831)); 115 brain tests + 8 lab scenarios verified locally `[unverified in remote CI until PR run completes]` |
+| **Root Cause & Execution** | Deterministic Evidence Gate (Rules R1–R8). | Best LLMs achieve ~25% accuracy on root-cause analysis; therefore deterministic rules decide proposals. The LLM only explains, cites evidence IDs, and lists unknowns. No LLM-authored text is ever executed. | **[M]** Evaluated deterministically across T-01 to T-28 matrix ([CI Run #23](https://github.com/bhattasubash/Self-Healing-System/actions/runs/38731022831)) |
+| **Telemetry History** | Relational bi-temporal change timeline. | Kubernetes events expire after 1 hour. Project Heal tracks change records with `valid_from`, `valid_to`, and `recorded_at` in an append-only relational SQLite store. | **[M]** Bi-temporal snapshot and diff verified ([CI Run #23](https://github.com/bhattasubash/Self-Healing-System/actions/runs/38731022831)) |
+| **GitOps Awareness** | Argo CD & Flux automatic detection. | If automated sync / self-heal is active, direct Kubernetes rollback is blocked. The agent routes to an A2 GitOps revert PR instead. | **[M]** Argo CD instance label guard verified ([CI Run #23](https://github.com/bhattasubash/Self-Healing-System/actions/runs/38731022831)) |
+| **Audit Integrity** | SHA-256 append-only hash chain. | Every triage decision, dry-run diff, human approval, execution, and verification result is hashed into an immutable chain. If an audit write fails, execution aborts. | **[M]** Tamper detection and fail-closed audit verified ([CI Run #23](https://github.com/bhattasubash/Self-Healing-System/actions/runs/38731022831)) |
 
 ---
 
@@ -154,13 +154,15 @@ pytest lab/test_lab_scenarios.py -v
 
 ## 🧪 Verification Matrix
 
-- **Brain Tests**: 96/96 passing (`brain/tests/`), **90.38% statement coverage** (exceeds 80% CI requirement).
-- **Chaos Lab Scenarios**: 5/5 passing (`lab/test_lab_scenarios.py`).
-- **MCP Client**: 14/14 passing (`packages/mcp-client/`), strict TypeScript compile clean.
+- **Brain Tests**: 107/107 passing in CI (`brain/tests/`), **89.31% statement coverage** ([CI Run #23](https://github.com/bhattasubash/Self-Healing-System/actions/runs/38731022831)); expanded to 115/115 passing locally `[unverified in remote CI until PR run completes]`.
+- **Chaos Lab Scenarios**: 8/8 passing locally (`lab/test_lab_scenarios.py`) `[unverified in remote CI until PR run completes]`.
+- **Real Cluster Proof (Kind Gate G0)**: 5/5 passing in CI ([CI Run #23](https://github.com/bhattasubash/Self-Healing-System/actions/runs/38731022831)); expanded to include T-06, T-07, T-09, T-13 in `lab/test_real_cluster.py` `[unverified in remote CI until PR run completes]`.
+- **MCP Client**: 14/14 passing (`packages/mcp-client/`), strict TypeScript compile clean ([CI Run #23](https://github.com/bhattasubash/Self-Healing-System/actions/runs/38731022831)).
 - **Static Security & Linting**:
-  - `ruff check app tests` clean (0 findings).
-  - `mypy --explicit-package-bases app` clean (0 findings across 19 source files).
-  - Secret scanning recall: 100% across 7 secret classes on seeded corpus.
+  - `ruff check app tests`: clean, 0 findings ([CI Run #23](https://github.com/bhattasubash/Self-Healing-System/actions/runs/38731022831)).
+  - `mypy --explicit-package-bases app`: clean, 0 findings across 22 source files ([CI Run #23](https://github.com/bhattasubash/Self-Healing-System/actions/runs/38731022831)).
+  - Secret scanning (`gitleaks`): 0 leaks detected ([Security Run #33](https://github.com/bhattasubash/Self-Healing-System/actions/runs/38731022820)).
+  - Dependency audit (`pip-audit`, `npm audit`): 0 vulnerabilities ([Security Run #33](https://github.com/bhattasubash/Self-Healing-System/actions/runs/38731022820)).
 
 ---
 

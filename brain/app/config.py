@@ -190,6 +190,41 @@ class AlertSettings(BaseSettings):
     )
 
 
+class KubernetesSettings(BaseSettings):
+    """Kubernetes cluster collector, watcher, and executor settings."""
+
+    model_config = SettingsConfigDict(env_prefix="K8S_")
+
+    collector_interval_seconds: int = Field(
+        default=15,
+        ge=1,
+        description="Polling and reconciliation interval in seconds.",
+    )
+    collector_enabled: bool = Field(
+        default=True,
+        description="Whether the background collector and watchers run during lifespan.",
+    )
+    allowed_namespaces: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Allowlisted namespaces for observation and remediation. "
+            "Default empty (default deny)."
+        ),
+    )
+    watch_enabled: bool = Field(
+        default=True,
+        description="Whether to run real-time blocking watches off the event loop.",
+    )
+    freshness_threshold_seconds: int = Field(
+        default=120,
+        ge=10,
+        description=(
+            "Maximum age of collector observation data before being "
+            "considered stale (caps tier at B/C)."
+        ),
+    )
+
+
 class Settings(BaseSettings):
     """
     Root application settings.
@@ -226,6 +261,7 @@ class Settings(BaseSettings):
     mcp: MCPSettings = Field(default_factory=MCPSettings)
     masking: MaskingSettings = Field(default_factory=MaskingSettings)
     alert: AlertSettings = Field(default_factory=AlertSettings)
+    kubernetes: KubernetesSettings = Field(default_factory=KubernetesSettings)
 
 
 # ─── Singleton accessor ──────────────────────────────────────────────

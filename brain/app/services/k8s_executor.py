@@ -92,7 +92,12 @@ class KubernetesRollbackExecutor:
     ) -> None:
         self.apps_api = apps_api
         self.audit_logger = audit_logger or AuditLogger()
-        self.allowlisted_namespaces = allowlisted_namespaces or {"default", "payments", "orders"}
+        if allowlisted_namespaces is not None:
+            self.allowlisted_namespaces = set(allowlisted_namespaces)
+        else:
+            from app.config import get_settings
+
+            self.allowlisted_namespaces = set(get_settings().kubernetes.allowed_namespaces)
         self._log = logger.bind(component="k8s_executor")
 
     def _get_api(self) -> Any:

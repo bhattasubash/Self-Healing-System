@@ -17,6 +17,7 @@ Provides the human-in-the-loop write-access gate:
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import json
@@ -25,8 +26,9 @@ import urllib.parse
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Annotated, Any
 
+import httpx
 import structlog
-from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
+from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Request, status
 from pydantic import BaseModel, Field, field_validator
 
 from app.config import Settings, get_settings
@@ -47,6 +49,18 @@ SLACK_TIMESTAMP_TOLERANCE_SECONDS = 300
 
 ApprovalRegistry = SQLiteApprovalRegistry
 _GLOBAL_APPROVAL_REGISTRY = SQLiteApprovalRegistry()
+_running_tasks: set[asyncio.Task[Any]] = set()
+
+
+def _schedule_task(coro: Any) -> asyncio.Task[Any] | None:
+    try:
+        loop = asyncio.get_running_loop()
+        task = loop.create_task(coro)
+        _running_tasks.add(task)
+        task.add_done_callback(_running_tasks.discard)
+        return task
+    except RuntimeError:
+        return None
 
 
 def get_approval_registry() -> SQLiteApprovalRegistry:
@@ -328,6 +342,7 @@ def build_slack_approval_card(
 )
 async def process_approval_decision(
     request: Request,
+    background_tasks: BackgroundTasks,
     settings: Annotated[Settings, Depends(get_settings)],
     registry: Annotated[ApprovalRegistry, Depends(get_approval_registry)],
     x_slack_signature: str | None = Header(None, alias="X-Slack-Signature"),
@@ -384,6 +399,7 @@ async def process_approval_decision(
     decided_by: str = ""
     decision_reason: str | None = None
     incident_id: str | None = None
+    response_url: str | None = None
 
     if "application/x-www-form-urlencoded" in content_type or body_bytes.startswith(b"payload="):
         # Slack Block Kit interactive callback
@@ -402,6 +418,7 @@ async def process_approval_decision(
             ) from json_err
 
         user = slack_data.get("user", {})
+        response_url = slack_data.get("response_url")
         decided_by = user.get("id") or user.get("username") or ""
         if not decided_by:
             raise HTTPException(
@@ -545,17 +562,32 @@ async def process_approval_decision(
     execution_status: str | None = None
     audit_hash: str | None = None
     if decision_norm == "approved":
-        try:
-            exec_res = execute_k8s_rollback_from_approval(record)
-            execution_status = exec_res.get("status")
-            audit_hash = exec_res.get("audit_hash")
-        except Exception as exec_err:
-            logger.error("rollback_from_approval_failed", error=str(exec_err))
-            execution_status = "error"
-
-    record.execution_status = execution_status
-    record.audit_hash = audit_hash
-    registry.update_record(record)
+        execution_status = "in_progress"
+        record.execution_status = "in_progress"
+        registry.update_record(record)
+        t = _schedule_task(
+            _async_execute_rollback_and_notify_slack(record.approval_id, response_url)
+        )
+        if t is None:
+            background_tasks.add_task(
+                _async_execute_rollback_and_notify_slack,
+                record.approval_id,
+                response_url,
+            )
+    elif decision_norm == "rejected":
+        execution_status = "rejected"
+        record.execution_status = "rejected"
+        registry.update_record(record)
+        if response_url:
+            reject_msg = {
+                "replace_original": "true",
+                "text": (
+                    f"🛑 Remediation rejected by {decided_by} ({approver_role}). "
+                    "Action aborted."
+                ),
+            }
+            if _schedule_task(_post_slack_update(response_url, reject_msg)) is None:
+                background_tasks.add_task(_post_slack_update, response_url, reject_msg)
 
     msg = (
         f"Fix approved by {decided_by} ({approver_role}). "
@@ -575,6 +607,83 @@ async def process_approval_decision(
         execution_status=execution_status,
         audit_hash=audit_hash,
     )
+
+
+async def _post_slack_update(response_url: str, message: dict[str, Any]) -> None:
+    """Sends an asynchronous update to Slack via response_url."""
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.post(response_url, json=message)
+            if resp.status_code >= 400:
+                logger.warning(
+                    "slack_response_url_update_failed",
+                    status_code=resp.status_code,
+                    body=resp.text,
+                )
+    except Exception as exc:
+        logger.error("slack_response_url_update_error", error=str(exc))
+
+
+async def _async_execute_rollback_and_notify_slack(
+    approval_id: str,
+    response_url: str | None = None,
+) -> None:
+    """Executes rollback in the background, updates SQLite registry, and notifies Slack."""
+    reg = get_approval_registry()
+    record = reg.get_request(approval_id)
+    if not record:
+        return
+
+    execution_status: str | None = None
+    audit_hash: str | None = None
+    message_text: str = ""
+
+    try:
+        exec_res = await asyncio.to_thread(execute_k8s_rollback_from_approval, record)
+        execution_status = exec_res.get("status")
+        audit_hash = exec_res.get("audit_hash")
+        undo_executed = exec_res.get("undo_executed", False)
+
+        if undo_executed:
+            execution_status = "undone_escalated"
+            message_text = (
+                "⚠️ Rollback failed stabilization; automatic single undo executed "
+                "and incident escalated to human on-call."
+            )
+        else:
+            message_text = (
+                f"✅ Rollback to revision {exec_res.get('target_revision')} "
+                "executed and verified stabilized."
+            )
+    except Exception as exc:
+        logger.error("async_rollback_failed", error=str(exc), approval_id=approval_id)
+        execution_status = "error"
+        message_text = f"❌ Rollback execution encountered error: {exc}"
+
+    record.execution_status = execution_status
+    record.audit_hash = audit_hash
+    reg.update_record(record)
+
+    if response_url:
+        update_payload = {
+            "replace_original": "true",
+            "text": message_text,
+            "blocks": [
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": (
+                            f"*{message_text}*\n"
+                            f"• *Incident ID:* `{record.incident_id}`\n"
+                            f"• *Status:* `{execution_status}`\n"
+                            f"• *Audit Hash:* `{audit_hash or 'none'}`"
+                        ),
+                    },
+                }
+            ],
+        }
+        await _post_slack_update(response_url, update_payload)
 
 
 def execute_k8s_rollback_from_approval(record: Any) -> dict[str, Any]:

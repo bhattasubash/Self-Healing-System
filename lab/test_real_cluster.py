@@ -34,8 +34,15 @@ from app.config import Settings, get_settings
 from app.main import app
 from app.routers.alert_intake import set_alert_temporal_store
 from app.services.approval_store import SQLiteApprovalRegistry
+from app.services.audit_logger import AuditLogger
 from app.services.k8s_collector import KubernetesCollector
-from app.services.temporal_store import TemporalStore
+from app.services.k8s_executor import ActionEnvelope, KubernetesRollbackExecutor
+from app.services.temporal_store import (
+    ChangeRecord,
+    EntityRecord,
+    ObservationRecord,
+    TemporalStore,
+)
 from fastapi.testclient import TestClient
 from pydantic import SecretStr
 
@@ -112,6 +119,8 @@ def test_settings() -> Settings:
         "U_SRE_LEAD": "sre-lead",
         "U_PLATFORM": "platform-engineer",
     }
+    s.kubernetes.allowed_namespaces = ["payments", "default"]
+    s.kubernetes.collector_enabled = False
     return s
 
 
@@ -353,14 +362,21 @@ async def test_real_cluster_t01_bad_image_rollback_flow(
     appr_data = appr_resp.json()
 
     assert appr_data["decision"] == "approved"
-    assert appr_data["execution_status"] == "resolved"
-    assert appr_data["audit_hash"] is not None
+    assert appr_data["execution_status"] in ("in_progress", "resolved", "verified")
 
     # 7. Verify Real Cluster Deployment Restored
-    deploy = apps_api.read_namespaced_deployment(name="payment-gateway", namespace="payments")
-    restored_image = deploy.spec.template.spec.containers[0].image
+    restored_image = ""
+    ready_replicas = 0
+    for _ in range(60):
+        deploy = apps_api.read_namespaced_deployment(name="payment-gateway", namespace="payments")
+        restored_image = deploy.spec.template.spec.containers[0].image
+        ready_replicas = deploy.status.ready_replicas or 0
+        if restored_image == "hashicorp/http-echo:0.2.3" and ready_replicas == 3:
+            break
+        await asyncio.sleep(1)
+
     assert restored_image == "hashicorp/http-echo:0.2.3"
-    assert deploy.status.ready_replicas == 3
+    assert ready_replicas == 3
 
 
 @pytest.mark.skipif(not is_k8s_cluster_reachable(), reason="Live Kubernetes cluster not available")
@@ -476,7 +492,21 @@ async def test_real_cluster_t02_crashloop_rollback_flow(
         headers=headers,
     )
     assert appr_resp.status_code == 200
-    assert appr_resp.json()["execution_status"] == "resolved"
+    assert appr_resp.json()["execution_status"] in ("in_progress", "resolved", "verified")
+
+    # Verify restoration on live cluster
+    restored_cmd = ["dummy"]
+    ready_replicas = 0
+    for _ in range(60):
+        deploy = apps_api.read_namespaced_deployment(name="payment-gateway", namespace="payments")
+        restored_cmd = deploy.spec.template.spec.containers[0].command
+        ready_replicas = deploy.status.ready_replicas or 0
+        if restored_cmd is None and ready_replicas == 3:
+            break
+        await asyncio.sleep(1)
+
+    assert restored_cmd is None
+    assert ready_replicas == 3
 
 
 @pytest.mark.skipif(not is_k8s_cluster_reachable(), reason="Live Kubernetes cluster not available")
@@ -582,4 +612,280 @@ async def test_real_cluster_t04_failing_readiness_rollback_flow(
         headers=headers,
     )
     assert appr_resp.status_code == 200
-    assert appr_resp.json()["execution_status"] == "resolved"
+    assert appr_resp.json()["execution_status"] in ("in_progress", "resolved", "verified")
+
+    # Verify restoration on live cluster
+    restored_path = ""
+    ready_replicas = 0
+    for _ in range(60):
+        deploy = apps_api.read_namespaced_deployment(name="payment-gateway", namespace="payments")
+        probe = deploy.spec.template.spec.containers[0].readiness_probe
+        restored_path = probe.http_get.path if probe and probe.http_get else ""
+        ready_replicas = deploy.status.ready_replicas or 0
+        if restored_path == "/" and ready_replicas == 3:
+            break
+        await asyncio.sleep(1)
+
+    assert restored_path == "/"
+    assert ready_replicas == 3
+
+
+@pytest.mark.skipif(not is_k8s_cluster_reachable(), reason="Live Kubernetes cluster not available")
+@pytest.mark.asyncio
+async def test_real_cluster_t06_unrelated_failure_yields_tier_c(
+    client: TestClient,
+    override_settings: None,
+    live_temporal_store: TemporalStore,
+    live_approval_registry: SQLiteApprovalRegistry,
+) -> None:
+    """Scenario T-06 on REAL Cluster: Unrelated failure without recorded change in 30m window yields Tier C."""
+    apps_api = get_real_cluster_apps_api()
+    core_api = get_real_cluster_core_api()
+    collector = KubernetesCollector()
+
+    _ensure_baseline_healthy(apps_api, core_api)
+    await collector.sync_all(live_temporal_store, "payments")
+
+    # No change recorded in temporal store for payment-gateway in 30m window
+    alert_time = datetime.now(UTC)
+    alert_payload = {
+        "receiver": "heal-webhook",
+        "status": "firing",
+        "alerts": [
+            {
+                "status": "firing",
+                "labels": {
+                    "alertname": "KubePodCrashLooping",
+                    "namespace": "payments",
+                    "deployment": "payment-gateway",
+                    "app": "payment-gateway",
+                    "severity": "critical",
+                },
+                "annotations": {
+                    "summary": "Pod payment-gateway is crash-looping unexpectedly",
+                    "description": "Transient failure with no associated deploy or config change",
+                },
+                "startsAt": alert_time.isoformat(),
+                "endsAt": "0001-01-01T00:00:00Z",
+                "fingerprint": "t06-real-cluster-fingerprint",
+            }
+        ],
+    }
+
+    alert_resp = client.post(
+        "/api/v1/alerts/alertmanager",
+        json=alert_payload,
+        headers={"Authorization": f"Bearer {TEST_ALERT_TOKEN}"},
+    )
+    assert alert_resp.status_code == 202
+    data = alert_resp.json()
+    assert data["status"] == "accepted"
+    assert data["tier"] == "TIER_C"
+    assert data["proposed_action"] == "NO_ACTION"
+    assert data["approval_id"] is None
+
+
+@pytest.mark.skipif(not is_k8s_cluster_reachable(), reason="Live Kubernetes cluster not available")
+@pytest.mark.asyncio
+async def test_real_cluster_t07_change_after_symptom_yields_tier_c(
+    client: TestClient,
+    override_settings: None,
+    live_temporal_store: TemporalStore,
+    live_approval_registry: SQLiteApprovalRegistry,
+) -> None:
+    """Scenario T-07 on REAL Cluster: Change executed after symptom onset fails R2 and yields Tier C."""
+    apps_api = get_real_cluster_apps_api()
+    core_api = get_real_cluster_core_api()
+    collector = KubernetesCollector()
+
+    _ensure_baseline_healthy(apps_api, core_api)
+    await collector.sync_all(live_temporal_store, "payments")
+
+    entity = await live_temporal_store.get_entity_by_name(
+        namespace="payments", name="payment-gateway", kind="Deployment"
+    )
+    assert entity is not None
+
+    now = datetime.now(UTC)
+    symptom_time = now - timedelta(minutes=15)
+    change_time = now - timedelta(minutes=5)  # Change 10m AFTER symptom!
+
+    # Record a change that happened after symptom onset
+    await live_temporal_store.record_change(
+        ChangeRecord(
+            entity_uid=entity.uid,
+            change_type="CONFIG_MUTATED",
+            summary="Emergency config update applied 10m after error spike began",
+            before_state={},
+            after_state={"config": "v2"},
+            valid_from=change_time,
+        )
+    )
+
+    alert_payload = {
+        "receiver": "heal-webhook",
+        "status": "firing",
+        "alerts": [
+            {
+                "status": "firing",
+                "labels": {
+                    "alertname": "HighErrorRate",
+                    "namespace": "payments",
+                    "deployment": "payment-gateway",
+                    "app": "payment-gateway",
+                    "severity": "critical",
+                },
+                "annotations": {
+                    "summary": "HTTP 500 error rate elevated",
+                    "description": "Errors started before the subsequent config patch",
+                },
+                "startsAt": symptom_time.isoformat(),
+                "endsAt": "0001-01-01T00:00:00Z",
+                "fingerprint": "t07-real-cluster-fingerprint",
+            }
+        ],
+    }
+
+    alert_resp = client.post(
+        "/api/v1/alerts/alertmanager",
+        json=alert_payload,
+        headers={"Authorization": f"Bearer {TEST_ALERT_TOKEN}"},
+    )
+    assert alert_resp.status_code == 202
+    data = alert_resp.json()
+    assert data["status"] == "accepted"
+    assert data["tier"] == "TIER_C"
+    assert data["proposed_action"] == "NO_ACTION"
+    assert data["approval_id"] is None
+
+
+@pytest.mark.skipif(not is_k8s_cluster_reachable(), reason="Live Kubernetes cluster not available")
+@pytest.mark.asyncio
+async def test_real_cluster_t09_migration_blocked_from_rollback(
+    client: TestClient,
+    override_settings: None,
+    live_temporal_store: TemporalStore,
+    live_approval_registry: SQLiteApprovalRegistry,
+) -> None:
+    """Scenario T-09 on REAL Cluster: Deploy labeled with migration=true fails R5 and yields Tier C."""
+    apps_api = get_real_cluster_apps_api()
+    core_api = get_real_cluster_core_api()
+    collector = KubernetesCollector()
+
+    _ensure_baseline_healthy(apps_api, core_api)
+
+    # Patch live deployment with migration label
+    patch_body = {
+        "metadata": {
+            "labels": {"migration": "true"}
+        }
+    }
+    apps_api.patch_namespaced_deployment(
+        name="payment-gateway", namespace="payments", body=patch_body
+    )
+
+    try:
+        await collector.sync_all(live_temporal_store, "payments")
+
+        alert_time = datetime.now(UTC)
+        alert_payload = {
+            "receiver": "heal-webhook",
+            "status": "firing",
+            "alerts": [
+                {
+                    "status": "firing",
+                    "labels": {
+                        "alertname": "KubeDeploymentRolloutStuck",
+                        "namespace": "payments",
+                        "deployment": "payment-gateway",
+                        "app": "payment-gateway",
+                        "severity": "critical",
+                    },
+                    "annotations": {
+                        "summary": "Deployment payments/payment-gateway rollout stuck on migration release",
+                        "description": "Migration release cannot be safely rolled back automatically",
+                    },
+                    "startsAt": alert_time.isoformat(),
+                    "endsAt": "0001-01-01T00:00:00Z",
+                    "fingerprint": "t09-real-cluster-fingerprint",
+                }
+            ],
+        }
+
+        alert_resp = client.post(
+            "/api/v1/alerts/alertmanager",
+            json=alert_payload,
+            headers={"Authorization": f"Bearer {TEST_ALERT_TOKEN}"},
+        )
+        assert alert_resp.status_code == 202
+        data = alert_resp.json()
+        assert data["status"] == "accepted"
+        assert data["tier"] == "TIER_C"
+        assert data["proposed_action"] == "NO_ACTION"
+        assert data["approval_id"] is None
+    finally:
+        # Clean up migration label
+        apps_api.patch_namespaced_deployment(
+            name="payment-gateway",
+            namespace="payments",
+            body={"metadata": {"labels": {"migration": None}}},
+        )
+
+
+@pytest.mark.skipif(not is_k8s_cluster_reachable(), reason="Live Kubernetes cluster not available")
+@pytest.mark.asyncio
+async def test_real_cluster_t13_action_worsens_conditions_single_undo_and_escalate(
+    tmp_path: Path,
+) -> None:
+    """
+    Scenario T-13 on REAL Cluster:
+    Rollback action that worsens conditions triggers exactly one automatic undo,
+    escalation, and leaves a cryptographically valid audit chain.
+    """
+    apps_api = get_real_cluster_apps_api()
+    core_api = get_real_cluster_core_api()
+
+    _ensure_baseline_healthy(apps_api, core_api)
+
+    deploy = apps_api.read_namespaced_deployment(name="payment-gateway", namespace="payments")
+    target_uid = deploy.metadata.uid
+
+    db_path = str(tmp_path / "t13_audit.db")
+    audit_logger = AuditLogger(db_path=db_path)
+
+    executor = KubernetesRollbackExecutor(
+        apps_api=apps_api,
+        audit_logger=audit_logger,
+        allowlisted_namespaces={"payments"},
+    )
+
+    # Force stabilization check to fail on real cluster, simulating worsening conditions
+    executor._verify_stabilization = lambda ns, name: False  # type: ignore[method-assign]
+
+    envelope = ActionEnvelope(
+        incident_id="inc-t13-real-cluster-01",
+        action_name="A1_ROLLBACK",
+        namespace="payments",
+        target_name="payment-gateway",
+        target_uid=target_uid,
+        approver="sre-lead",
+    )
+
+    result = executor.execute_rollback(envelope)
+
+    # Assert single undo and escalation
+    assert result.status == "undone"
+    assert result.verification_passed is False
+    assert result.undo_executed is True
+    assert "automatic undo restored" in result.message.lower()
+
+    # Assert audit chain recorded both execution and single undo
+    entries = audit_logger.get_entries(incident_id="inc-t13-real-cluster-01")
+    event_types = [e.event_type for e in entries]
+    assert "A1_ROLLBACK_EXECUTED" in event_types
+    assert "A1_ROLLBACK_UNDO_EXECUTED" in event_types
+
+    # Cryptographic integrity check
+    valid, err = audit_logger.verify_chain()
+    assert valid is True, f"Audit chain verification failed: {err}"
+    audit_logger.close()
