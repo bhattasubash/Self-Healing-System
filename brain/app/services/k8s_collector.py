@@ -70,6 +70,76 @@ class KubernetesCollector:
         except Exception as exc:
             self._log.warning("k8s_api_client_init_failed", error=str(exc))
 
+    def _record_deployment_sync(
+        self,
+        temporal_store: TemporalStore,
+        deploy: Any,
+        default_ns: str = "default",
+        change_source: str = "k8s_collector",
+    ) -> EntityRecord | None:
+        """Extracts and synchronously registers deployment entity and change into TemporalStore."""
+        meta = getattr(deploy, "metadata", None)
+        if not meta:
+            return None
+        uid = getattr(meta, "uid", None)
+        name = getattr(meta, "name", None)
+        if not uid or not name:
+            return None
+        ns = getattr(meta, "namespace", default_ns) or default_ns
+        spec = getattr(deploy, "spec", None)
+        status = getattr(deploy, "status", None)
+
+        now = datetime.now(UTC)
+        entity = EntityRecord(uid=str(uid), kind="Deployment", namespace=str(ns), name=str(name))
+        temporal_store._record_entity_sync(entity)
+
+        annotations = getattr(meta, "annotations", {}) or {}
+        revision = annotations.get("deployment.kubernetes.io/revision", "1")
+        template_spec = (
+            getattr(spec.template, "spec", None)
+            if spec and getattr(spec, "template", None)
+            else None
+        )
+        containers = getattr(template_spec, "containers", []) if template_spec else []
+        images = [getattr(c, "image", "") for c in containers]
+
+        def _to_int(val: Any, default: int = 0) -> int:
+            if isinstance(val, int):
+                return val
+            if isinstance(val, str) and val.isdigit():
+                return int(val)
+            return default
+
+        replicas = _to_int(getattr(spec, "replicas", 1) if spec else 1, default=1)
+        ready_replicas = _to_int(getattr(status, "ready_replicas", 0) if status else 0, default=0)
+        updated_replicas = _to_int(getattr(status, "updated_replicas", 0) if status else 0, default=0)
+
+        after_state = {
+            "revision": revision,
+            "replicas": replicas,
+            "ready_replicas": ready_replicas,
+            "updated_replicas": updated_replicas,
+            "images": images,
+            "rollout_in_flight": updated_replicas < replicas or ready_replicas < replicas,
+        }
+
+        summary = (
+            f"Deployment {name} {change_source} (rev {revision}, "
+            f"replicas {ready_replicas}/{replicas})"
+        )
+        change = ChangeRecord(
+            entity_uid=str(uid),
+            change_type="DEPLOYMENT_SYNC" if change_source == "k8s_collector" else "DEPLOYMENT_WATCH",
+            summary=summary,
+            before_state={},
+            after_state=after_state,
+            valid_from=now,
+            source=change_source,
+            actor="system",
+        )
+        temporal_store._record_change_sync(change)
+        return entity
+
     async def sync_deployments(
         self, temporal_store: TemporalStore, namespace: str | None = None
     ) -> list[EntityRecord]:
@@ -78,7 +148,6 @@ class KubernetesCollector:
         if not self.apps_api:
             return []
 
-        now = datetime.now(UTC)
         loop = asyncio.get_running_loop()
 
         def _fetch() -> Any:
@@ -94,51 +163,11 @@ class KubernetesCollector:
 
         records: list[EntityRecord] = []
         for deploy in getattr(res, "items", []):
-            meta = deploy.metadata
-            spec = deploy.spec
-            status = getattr(deploy, "status", None)
-            uid = meta.uid
-            ns = meta.namespace or "default"
-            name = meta.name
-
-            entity = EntityRecord(uid=uid, kind="Deployment", namespace=ns, name=name)
-            await temporal_store.record_entity(entity)
-            records.append(entity)
-
-            # Extract revision and spec state
-            annotations = meta.annotations or {}
-            revision = annotations.get("deployment.kubernetes.io/revision", "1")
-            containers = getattr(spec.template.spec, "containers", []) if spec.template else []
-            images = [getattr(c, "image", "") for c in containers]
-
-            replicas = getattr(spec, "replicas", 1) or 1
-            ready_replicas = getattr(status, "ready_replicas", 0) or 0
-            updated_replicas = getattr(status, "updated_replicas", 0) or 0
-
-            after_state = {
-                "revision": revision,
-                "replicas": replicas,
-                "ready_replicas": ready_replicas,
-                "updated_replicas": updated_replicas,
-                "images": images,
-                "rollout_in_flight": updated_replicas < replicas or ready_replicas < replicas,
-            }
-
-            summary = (
-                f"Deployment {name} sync (rev {revision}, "
-                f"replicas {ready_replicas}/{replicas})"
+            rec = self._record_deployment_sync(
+                temporal_store, deploy, default_ns=namespace or "default"
             )
-            change = ChangeRecord(
-                entity_uid=uid,
-                change_type="DEPLOYMENT_SYNC",
-                summary=summary,
-                before_state={},
-                after_state=after_state,
-                valid_from=now,
-                source="k8s_collector",
-                actor="system",
-            )
-            await temporal_store.record_change(change)
+            if rec:
+                records.append(rec)
 
         return records
 
@@ -523,6 +552,18 @@ class KubernetesCollector:
                                 meta = getattr(raw_obj, "metadata", None)
                                 if meta and hasattr(meta, "resource_version"):
                                     resource_version = meta.resource_version
+                                if meta and getattr(meta, "uid", None):
+                                    try:
+                                        self._record_deployment_sync(
+                                            temporal_store,
+                                            raw_obj,
+                                            default_ns=ns,
+                                            change_source="k8s_collector_watch",
+                                        )
+                                    except Exception as rec_err:
+                                        self._log.warning(
+                                            "watch_record_deployment_error", error=str(rec_err)
+                                        )
                         if stop_event.is_set():
                             break
                     except Exception as exc:

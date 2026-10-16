@@ -35,7 +35,7 @@ from app.config import Settings, get_settings
 from app.services.approval_store import (
     SQLiteApprovalRegistry,
 )
-from app.utils.validation import validate_incident_id
+from app.utils.validation import validate_incident_id, validate_slack_response_url
 
 if TYPE_CHECKING:
     from app.sandbox.e2b_runner import SandboxExecutionResult
@@ -465,6 +465,17 @@ async def process_approval_decision(
             detail=f"Invalid decision '{decision_str}'. Must be 'approved' or 'rejected'.",
         )
 
+    if response_url:
+        try:
+            response_url = validate_slack_response_url(response_url)
+        except ValueError as val_err:
+            logger.warning("invalid_slack_response_url", response_url=response_url, error=str(val_err))
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid response_url: {val_err}",
+            ) from val_err
+
+
     # 1. Enforce Approval Existence
     record = registry.get_request(approval_id)
     if not record:
@@ -562,6 +573,41 @@ async def process_approval_decision(
     execution_status: str | None = None
     audit_hash: str | None = None
     if decision_norm == "approved":
+        # Enforce PRD F-09/F-10 per-workload lock and cooldown
+        cooldown_sec = getattr(settings.kubernetes, "workload_cooldown_seconds", 1800)
+        allowed, reject_reason = registry.check_workload_action_allowed(
+            namespace=record.namespace,
+            target_service=record.target_service,
+            cooldown_seconds=cooldown_sec,
+            current_approval_id=record.approval_id,
+        )
+        if not allowed:
+            logger.warning(
+                "workload_action_gate_rejected",
+                approval_id=record.approval_id,
+                workload=f"{record.namespace}/{record.target_service}",
+                reason=reject_reason,
+            )
+            record.status = "rejected"
+            record.decided_by = decided_by
+            record.decided_at = now
+            record.decision_reason = reject_reason
+            record.execution_status = "rejected"
+            registry.update_record(record)
+
+            if response_url:
+                reject_msg = {
+                    "replace_original": "true",
+                    "text": f"🛑 {reject_reason}",
+                }
+                if _schedule_task(_post_slack_update(response_url, reject_msg)) is None:
+                    background_tasks.add_task(_post_slack_update, response_url, reject_msg)
+
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=reject_reason,
+            )
+
         execution_status = "in_progress"
         record.execution_status = "in_progress"
         registry.update_record(record)
@@ -612,8 +658,12 @@ async def process_approval_decision(
 async def _post_slack_update(response_url: str, message: dict[str, Any]) -> None:
     """Sends an asynchronous update to Slack via response_url."""
     try:
+        validated_url = validate_slack_response_url(response_url)
+        if not validated_url:
+            logger.warning("invalid_or_missing_response_url", url=response_url)
+            return
         async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.post(response_url, json=message)
+            resp = await client.post(validated_url, json=message)
             if resp.status_code >= 400:
                 logger.warning(
                     "slack_response_url_update_failed",
@@ -703,4 +753,144 @@ def execute_k8s_rollback_from_approval(record: Any) -> dict[str, Any]:
         return result.model_dump()
     finally:
         executor.audit_logger.close()
+
+
+def reconcile_in_progress_approvals_on_startup(
+    registry: SQLiteApprovalRegistry | None = None,
+    settings: Settings | None = None,
+    apps_api: Any = None,
+) -> list[Any]:
+    """
+    Crash recovery reconciliation routine invoked on brain startup (PRD Section 8):
+    1. Finds all approvals left in 'in_progress' state from an ungraceful shutdown.
+    2. Reconciles with actual live cluster state for each target workload.
+    3. Transitions execution_status to 'needs_human_review'.
+    4. Audits the event into the tamper-evident cryptographic log.
+    5. Dispatches an alert to Slack.
+    """
+    reg = registry or get_approval_registry()
+    app_settings = settings or get_settings()
+    orphans = reg.get_in_progress_approvals()
+    if not orphans:
+        logger.info("crash_recovery_no_orphaned_approvals")
+        return []
+
+    logger.warning("crash_recovery_orphaned_approvals_found", count=len(orphans))
+    from app.services.audit_logger import AuditLogger
+
+    audit_logger = AuditLogger()
+    reconciled: list[Any] = []
+
+    # Prepare Kubernetes API
+    api = apps_api
+    if api is None:
+        try:
+            from kubernetes import client, config
+
+            try:
+                config.load_incluster_config()
+            except Exception:
+                config.load_kube_config()
+            api = client.AppsV1Api()
+        except Exception as k8s_err:
+            logger.warning("crash_recovery_k8s_client_init_failed", error=str(k8s_err))
+
+    try:
+        for record in orphans:
+            cluster_state: dict[str, Any] = {}
+            if api and record.target_service:
+                try:
+                    deploy = api.read_namespaced_deployment(
+                        name=record.target_service,
+                        namespace=record.namespace,
+                    )
+                    meta = getattr(deploy, "metadata", None)
+                    spec = getattr(deploy, "spec", None)
+                    k8s_status = getattr(deploy, "status", None)
+                    annotations = getattr(meta, "annotations", {}) or {}
+                    revision = annotations.get("deployment.kubernetes.io/revision", "unknown")
+                    ready_replicas = getattr(k8s_status, "ready_replicas", 0) or 0
+                    replicas = getattr(spec, "replicas", 1) or 1
+
+                    cluster_state = {
+                        "exists": True,
+                        "current_revision": revision,
+                        "ready_replicas": ready_replicas,
+                        "desired_replicas": replicas,
+                        "stabilized": ready_replicas == replicas,
+                    }
+                except Exception as exc:
+                    cluster_state = {"exists": False, "error": str(exc)}
+            else:
+                cluster_state = {"exists": "unknown", "reason": "k8s_api_unavailable"}
+
+            # Mark needs_human_review
+            record.execution_status = "needs_human_review"
+            record.decision_reason = (
+                f"Crash recovery reconcile: process was interrupted mid-execution. "
+                f"Cluster state: {cluster_state}. Marked for human review."
+            )
+            reg.update_record(record)
+
+            # Audit it
+            try:
+                audit_entry = audit_logger.append_event(
+                    incident_id=record.incident_id,
+                    event_type="CRASH_RECOVERY_RECONCILE",
+                    data={
+                        "approval_id": record.approval_id,
+                        "target_resource": f"{record.namespace}/{record.target_service}",
+                        "actor": "system:crash_recovery",
+                        "cluster_state": cluster_state,
+                        "previous_execution_status": "in_progress",
+                        "new_execution_status": "needs_human_review",
+                    },
+                )
+                record.audit_hash = audit_entry.entry_hash
+                reg.update_record(record)
+            except Exception as audit_err:
+                logger.error("crash_recovery_audit_failed", error=str(audit_err))
+
+            # Post alert to Slack
+            channel = app_settings.slack.approval_channel
+            token = app_settings.slack.bot_token.get_secret_value()
+            if channel and token:
+                try:
+                    alert_text = (
+                        f"🚨 *CRASH RECOVERY ALERT: Interrupted Remediation Detected*\n"
+                        f"• *Approval ID:* `{record.approval_id}`\n"
+                        f"• *Incident ID:* `{record.incident_id}`\n"
+                        f"• *Workload:* `{record.namespace}/{record.target_service}`\n"
+                        f"• *Status:* `needs_human_review`\n"
+                        f"• *Cluster State:* `{cluster_state}`\n"
+                        f"• *Audit Hash:* `{record.audit_hash or 'none'}`"
+                    )
+                    headers = {
+                        "Authorization": f"Bearer {token}",
+                        "Content-Type": "application/json",
+                    }
+                    payload = {"channel": channel, "text": alert_text}
+                    with httpx.Client(timeout=5.0) as http_client:
+                        http_client.post(
+                            "https://slack.com/api/chat.postMessage",
+                            json=payload,
+                            headers=headers,
+                        )
+                except Exception as slack_err:
+                    logger.warning("crash_recovery_slack_notify_failed", error=str(slack_err))
+            else:
+                logger.info(
+                    "crash_recovery_slack_alert_simulated",
+                    approval_id=record.approval_id,
+                    channel=channel or "#default-channel",
+                    status="needs_human_review",
+                    cluster_state=cluster_state,
+                )
+
+            reconciled.append(record)
+    finally:
+        audit_logger.close()
+
+    return reconciled
+
 

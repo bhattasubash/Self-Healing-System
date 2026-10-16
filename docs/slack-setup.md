@@ -74,11 +74,13 @@ From the app dashboard:
 
 ## 3. Ingress Tunnel Configuration
 
-To receive interactive webhooks locally or in a lab without a public IP, use Cloudflare Tunnel or ngrok.
+To receive interactive webhooks locally or in a lab without a public IP, use an ingress tunnel that strictly adheres to the **Perimeter Minimization** invariant: **only** `/api/v1/approval/interactive` may be exposed externally. Exposing the entire port (e.g. running unconstrained `ngrok http 8000`) is prohibited by security policy because it exposes private internal endpoints (`/api/v1/alerts/*`, `/ready`, `/health`, analysis engines).
 
 ### Option A: Cloudflare Tunnel (`cloudflared`) [Recommended]
 
-Create a configuration file `cloudflared-config.yml` that strictly allows only the approval endpoint:
+`cloudflared` is the recommended option as it natively enforces path-level ingress filtering and fails closed on unlisted paths.
+
+Create a configuration file `cloudflared-config.yml`:
 
 ```yaml
 tunnel: <TUNNEL_UUID>
@@ -97,11 +99,32 @@ Start the tunnel:
 cloudflared tunnel run <TUNNEL_NAME>
 ```
 
-### Option B: ngrok
+### Option B: Path-Restricted ngrok (Traffic Policy)
 
-Start an HTTP tunnel restricting traffic to port 8000:
+If ngrok is required, you **must not** run an unconstrained `ngrok http 8000` tunnel. You must use an ngrok configuration with a traffic policy (`ngrok-policy.yml`) restricting exposure strictly to the approval endpoint:
+
+```yaml
+version: 2
+authtoken: <YOUR_NGROK_AUTHTOKEN>
+tunnels:
+  heal-approval:
+    proto: http
+    addr: 8000
+    traffic_policy:
+      inbound:
+        - name: "Block all non-approval endpoints"
+          actions:
+            - type: custom-response
+              config:
+                status_code: 404
+                body: "Not Found"
+          expressions:
+            - "!req.url.path.startsWith('/api/v1/approval/interactive')"
+```
+
+Start the path-restricted tunnel:
 ```bash
-ngrok http 8000
+ngrok start heal-approval --config ngrok-policy.yml
 ```
 Update your Slack App Interactivity Request URL to:
 `https://<your-subdomain>.ngrok-free.app/api/v1/approval/interactive`

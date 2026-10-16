@@ -31,6 +31,7 @@ from app.main import app
 from app.routers.approval import (
     build_slack_approval_card,
     get_approval_registry,
+    reconcile_in_progress_approvals_on_startup,
     verify_slack_signature,
 )
 from app.sandbox.e2b_runner import ResourceUsage, SandboxExecutionResult
@@ -439,3 +440,261 @@ def test_approval_endpoint_parses_real_slack_interactive_payload(client: TestCli
         assert "U998877" in data["message"]
     finally:
         app.dependency_overrides.pop(get_settings, None)
+
+
+def test_decision_endpoint_validates_response_url_host(client: TestClient) -> None:
+    """The decision/interactive endpoint rejects untrusted response_url hosts with HTTP 400."""
+    reg = get_approval_registry()
+    reg.clear()
+    reg.register_request(
+        approval_id="appr-url-check",
+        incident_id="inc-url-01",
+        target_service="payment-service",
+        allowed_roles=["admin"],
+    )
+
+    def get_test_settings() -> Settings:
+        s = Settings()
+        s.slack.dev_mode = True
+        return s
+
+    app.dependency_overrides[get_settings] = get_test_settings
+    try:
+        # 1. Malicious / untrusted response_url
+        evil_payload = {
+            "type": "block_actions",
+            "user": {"id": "U12345", "username": "admin_user"},
+            "response_url": "https://malicious-internal-server.local/ssrf",
+            "actions": [
+                {
+                    "action_id": "approve_and_deploy_action",
+                    "value": "appr-url-check:approved",
+                    "type": "button",
+                }
+            ],
+        }
+        form_evil = urllib.parse.urlencode({"payload": json.dumps(evil_payload)}).encode("utf-8")
+        headers = {"Content-Type": "application/x-www-form-urlencoded"}
+
+        resp_evil = client.post("/api/v1/approval/decision", content=form_evil, headers=headers)
+        assert resp_evil.status_code == 400
+        assert "Invalid response_url" in resp_evil.json()["detail"]
+        assert "hooks.slack.com" in resp_evil.json()["detail"]
+
+        # 2. Valid response_url on hooks.slack.com
+        valid_payload = {
+            "type": "block_actions",
+            "user": {"id": "U12345", "username": "admin_user"},
+            "response_url": "https://hooks.slack.com/actions/T123/B456/abcdef123456",
+            "actions": [
+                {
+                    "action_id": "approve_and_deploy_action",
+                    "value": "appr-url-check:approved",
+                    "type": "button",
+                }
+            ],
+        }
+        form_valid = urllib.parse.urlencode({"payload": json.dumps(valid_payload)}).encode("utf-8")
+
+        resp_valid = client.post("/api/v1/approval/decision", content=form_valid, headers=headers)
+        assert resp_valid.status_code == 200
+        assert resp_valid.json()["status"] == "PROCESSED"
+    finally:
+        app.dependency_overrides.pop(get_settings, None)
+
+
+def test_crash_recovery_on_startup_reconciles_in_progress_approvals() -> None:
+    """
+    Requirement 3: Crash recovery finds approvals left in 'in_progress' state
+    (simulating a crash mid-execution), reconciles against cluster state,
+    marks them as 'needs_human_review', creates an audit entry, and alerts Slack.
+    """
+    from unittest.mock import MagicMock, patch
+
+    reg = get_approval_registry()
+    reg.clear()
+
+    # Create an approval that was mid-execution when brain was killed
+    reg.register_request(
+        approval_id="appr-crash-01",
+        incident_id="inc-crash-01",
+        target_service="order-processor",
+        namespace="checkout",
+        allowed_roles=["sre-lead"],
+    )
+    rec = reg.get_request("appr-crash-01")
+    assert rec is not None
+    rec.status = "APPROVED"
+    rec.execution_status = "in_progress"
+    rec.decided_by = "U_SRE_LEAD"
+    rec.decided_at = datetime.now(UTC)
+    reg.update_record(rec)
+
+    # Verify get_in_progress_approvals finds it
+    in_progress = reg.get_in_progress_approvals()
+    assert len(in_progress) == 1
+    assert in_progress[0].approval_id == "appr-crash-01"
+
+    # Mock cluster state
+    mock_apps = MagicMock()
+    mock_deploy = MagicMock()
+    mock_deploy.metadata.annotations = {"deployment.kubernetes.io/revision": "4"}
+    mock_deploy.spec.replicas = 3
+    mock_deploy.status.ready_replicas = 3
+    mock_apps.read_namespaced_deployment.return_value = mock_deploy
+
+    test_settings = Settings()
+    test_settings.slack.approval_channel = "C_ALERTS"
+    test_settings.slack.bot_token = SecretStr("xoxb-fake-token")
+
+    slack_posted_payloads: list[dict] = []
+
+    def mock_post(url: str, **kwargs: Any) -> Any:
+        slack_posted_payloads.append(kwargs)
+        res = MagicMock()
+        res.status_code = 200
+        return res
+
+    with (
+        patch("httpx.Client.post", side_effect=mock_post),
+    ):
+        reconciled = reconcile_in_progress_approvals_on_startup(
+            registry=reg,
+            settings=test_settings,
+            apps_api=mock_apps,
+        )
+
+    assert len(reconciled) == 1
+    updated_rec = reg.get_request("appr-crash-01")
+    assert updated_rec is not None
+    assert updated_rec.execution_status == "needs_human_review"
+    assert "Crash recovery reconcile" in (updated_rec.decision_reason or "")
+    assert updated_rec.audit_hash is not None
+    assert len(updated_rec.audit_hash) == 64
+
+    # Verify Slack was notified
+    assert len(slack_posted_payloads) == 1
+    posted_text = slack_posted_payloads[0]["json"]["text"]
+    assert "CRASH RECOVERY ALERT" in posted_text
+    assert "appr-crash-01" in posted_text
+    assert "needs_human_review" in posted_text
+    assert "checkout/order-processor" in posted_text
+
+
+def test_concurrent_approvals_for_same_workload_rejected(client: TestClient) -> None:
+    """
+    Requirement 4 (F-09/F-10): Concurrent approvals for the same workload:
+    second one is rejected with a clear explanation (HTTP 409).
+    """
+    reg = get_approval_registry()
+    reg.clear()
+
+    # 1. Register first approval and set it to in_progress
+    reg.register_request(
+        approval_id="appr-workload-active",
+        incident_id="inc-wk-01",
+        target_service="payment-gw",
+        namespace="payments",
+        allowed_roles=["admin"],
+    )
+    rec1 = reg.get_request("appr-workload-active")
+    assert rec1 is not None
+    rec1.status = "APPROVED"
+    rec1.execution_status = "in_progress"
+    rec1.decided_by = "U_ADMIN_1"
+    reg.update_record(rec1)
+
+    # 2. Register second approval for the same workload (payments/payment-gw)
+    reg.register_request(
+        approval_id="appr-workload-second",
+        incident_id="inc-wk-02",
+        target_service="payment-gw",
+        namespace="payments",
+        allowed_roles=["admin"],
+    )
+
+    def get_test_settings() -> Settings:
+        s = Settings()
+        s.slack.dev_mode = True
+        return s
+
+    app.dependency_overrides[get_settings] = get_test_settings
+    try:
+        # Attempt to approve the second request while the first is in progress
+        response = client.post(
+            "/api/v1/approval/decision",
+            json={
+                "approval_id": "appr-workload-second",
+                "incident_id": "inc-wk-02",
+                "decision": "approved",
+                "decided_by": "U_ADMIN_2",
+            },
+        )
+        assert response.status_code == 409
+        detail = response.json()["detail"]
+        assert "active remediation in progress" in detail
+        assert "payments/payment-gw" in detail
+        assert "appr-workload-active" in detail
+    finally:
+        app.dependency_overrides.pop(get_settings, None)
+
+
+def test_workload_cooldown_enforced(client: TestClient) -> None:
+    """
+    Requirement 4 (F-09/F-10): Per-workload cooldown window prevents rapid-fire
+    sequential actions on the same workload.
+    """
+    reg = get_approval_registry()
+    reg.clear()
+
+    # 1. Complete an approval for payments/payment-gw just now
+    reg.register_request(
+        approval_id="appr-cd-completed",
+        incident_id="inc-cd-01",
+        target_service="payment-gw",
+        namespace="payments",
+        allowed_roles=["admin"],
+    )
+    rec1 = reg.get_request("appr-cd-completed")
+    assert rec1 is not None
+    rec1.status = "APPROVED"
+    rec1.execution_status = "completed"
+    rec1.decided_by = "U_ADMIN_1"
+    rec1.decided_at = datetime.now(UTC)
+    reg.update_record(rec1)
+
+    # 2. Register a new approval for the same workload
+    reg.register_request(
+        approval_id="appr-cd-next",
+        incident_id="inc-cd-02",
+        target_service="payment-gw",
+        namespace="payments",
+        allowed_roles=["admin"],
+    )
+
+    def get_test_settings() -> Settings:
+        s = Settings()
+        s.slack.dev_mode = True
+        s.kubernetes.workload_cooldown_seconds = 1800  # 30 minutes
+        return s
+
+    app.dependency_overrides[get_settings] = get_test_settings
+    try:
+        response = client.post(
+            "/api/v1/approval/decision",
+            json={
+                "approval_id": "appr-cd-next",
+                "incident_id": "inc-cd-02",
+                "decision": "approved",
+                "decided_by": "U_ADMIN_2",
+            },
+        )
+        assert response.status_code == 409
+        detail = response.json()["detail"]
+        assert "is in cooldown until" in detail
+        assert "payments/payment-gw" in detail
+        assert "PRD F-09/F-10" in detail
+    finally:
+        app.dependency_overrides.pop(get_settings, None)
+
+

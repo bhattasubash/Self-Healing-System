@@ -174,3 +174,208 @@ async def test_collector_persists_events_beyond_1h_ttl(store: TemporalStore) -> 
     assert len(obs) == 1
     assert obs[0].status == "unhealthy"
     assert "BackOff" in obs[0].metric_name
+
+
+@pytest.mark.asyncio
+async def test_lifespan_service_populates_store_automatically(tmp_path: Any) -> None:
+    """
+    Requirement 1: Proves that FastAPI lifespan starts run_watches_in_background
+    when watch_enabled is true, and the service itself populates the TemporalStore
+    automatically without any test-harness sync call.
+    """
+    from app.config import Settings
+    from app.main import create_app, lifespan
+
+    db_path = str(tmp_path / "lifespan_collector.db")
+    test_settings = Settings()
+    test_settings.temporal_store.db_path = db_path
+    test_settings.kubernetes.collector_enabled = True
+    test_settings.kubernetes.watch_enabled = True
+    test_settings.kubernetes.allowed_namespaces = ["payments"]
+    test_settings.kubernetes.collector_interval_seconds = 10
+
+    mock_deploy = MagicMock()
+    mock_deploy.metadata.uid = "deploy-auto-watch-99"
+    mock_deploy.metadata.name = "payment-gateway"
+    mock_deploy.metadata.namespace = "payments"
+    mock_deploy.metadata.annotations = {"deployment.kubernetes.io/revision": "2"}
+    mock_deploy.metadata.labels = {"app": "payment-gateway"}
+    mock_deploy.metadata.resource_version = "12345"
+    mock_deploy.spec.replicas = 3
+    mock_deploy.status.ready_replicas = 3
+    mock_deploy.status.updated_replicas = 3
+    mock_c = MagicMock()
+    mock_c.name = "gateway"
+    mock_c.image = "payment-gateway:v2"
+    mock_deploy.spec.template.spec.containers = [mock_c]
+
+    mock_apps = MagicMock()
+    mock_core = MagicMock()
+    call_count = 0
+
+    def fake_stream(*args: Any, **kwargs: Any) -> Any:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            yield {"type": "ADDED", "object": mock_deploy}
+        else:
+            import time
+            time.sleep(0.05)
+            return []
+
+    app = create_app(settings=test_settings)
+
+    with (
+        patch("app.main.get_settings", return_value=test_settings),
+        patch("app.routers.approval.get_settings", return_value=test_settings),
+        patch("kubernetes.config.load_incluster_config", return_value=None),
+        patch("kubernetes.config.load_kube_config", return_value=None),
+        patch("kubernetes.client.AppsV1Api", return_value=mock_apps),
+        patch("kubernetes.client.CoreV1Api", return_value=mock_core),
+        patch("kubernetes.watch.Watch.stream", side_effect=fake_stream),
+    ):
+        # Run the service lifespan context - the test harness calls NO sync methods
+        async with lifespan(app):
+            # Wait for the service background watch thread to receive and store the entity
+            for _ in range(30):
+                await asyncio.sleep(0.1)
+                async with TemporalStore(db_path=db_path) as check_store:
+                    entity = await check_store.get_entity("deploy-auto-watch-99")
+                    if entity is not None:
+                        break
+
+    # Verify the service itself populated the store
+    async with TemporalStore(db_path=db_path) as check_store:
+        entity = await check_store.get_entity("deploy-auto-watch-99")
+        assert entity is not None
+        assert entity.uid == "deploy-auto-watch-99"
+        assert entity.name == "payment-gateway"
+        assert entity.namespace == "payments"
+        assert entity.kind == "Deployment"
+
+
+@pytest.mark.asyncio
+async def test_empty_allowed_namespaces_collects_nothing_and_acts_on_nothing(tmp_path: Any) -> None:
+    """
+    Requirement 2: Empty allowed_namespaces must mean: collect nothing, act on nothing.
+    """
+    from app.config import Settings
+    from app.main import create_app, lifespan
+    from app.services.k8s_executor import ActionEnvelope, KubernetesRollbackExecutor, PreconditionFailedError
+
+    db_path = str(tmp_path / "empty_ns.db")
+    test_settings = Settings()
+    test_settings.temporal_store.db_path = db_path
+    test_settings.kubernetes.collector_enabled = True
+    test_settings.kubernetes.watch_enabled = True
+    test_settings.kubernetes.allowed_namespaces = []  # Empty allowlist!
+    test_settings.kubernetes.broad_read_opt_in = False  # No opt-in
+
+    mock_apps = MagicMock()
+
+    app = create_app(settings=test_settings)
+
+    with (
+        patch("app.main.get_settings", return_value=test_settings),
+        patch("app.services.k8s_collector.KubernetesCollector._ensure_apis") as mock_ensure,
+    ):
+        mock_ensure.side_effect = lambda: None
+
+        # 1. Lifespan runs with empty allowed_namespaces: collect nothing
+        async with lifespan(app):
+            await asyncio.sleep(0.2)
+
+    # Verify 0 entities collected in the store
+    async with TemporalStore(db_path=db_path) as check_store:
+        entities = await check_store.get_entities()
+        assert len(entities) == 0
+
+    # 2. Act on nothing: Executor rejects any action when allowed_namespaces is empty
+    executor = KubernetesRollbackExecutor(
+        apps_api=mock_apps,
+        allowlisted_namespaces=[],
+    )
+    try:
+        envelope = ActionEnvelope(
+            incident_id="inc-empty-ns-01",
+            action_name="A1_ROLLBACK",
+            namespace="payments",
+            target_name="payment-svc",
+            target_uid="uid-svc-001",
+            approver="operator-1",
+        )
+        with pytest.raises(PreconditionFailedError) as exc_info:
+            executor.check_preconditions(envelope)
+
+        assert "not in allowlist" in str(exc_info.value)
+    finally:
+        executor.audit_logger.close()
+
+
+@pytest.mark.asyncio
+async def test_broad_read_opt_in_allows_read_only_collection_but_acts_on_nothing(tmp_path: Any) -> None:
+    """
+    Requirement 2 (opt-in): broad_read_opt_in allows broad cluster read telemetry collection,
+    while action execution strictly requires explicit allowed_namespaces and rejects actions.
+    """
+    from app.config import Settings
+    from app.services.k8s_executor import ActionEnvelope, KubernetesRollbackExecutor, PreconditionFailedError
+
+    db_path = str(tmp_path / "broad_read.db")
+    test_settings = Settings()
+    test_settings.temporal_store.db_path = db_path
+    test_settings.kubernetes.collector_enabled = True
+    test_settings.kubernetes.allowed_namespaces = []  # Empty allowlist
+    test_settings.kubernetes.broad_read_opt_in = True  # Explicit opt-in for broader read access
+
+    mock_deploy = MagicMock()
+    mock_deploy.metadata.uid = "deploy-broad-01"
+    mock_deploy.metadata.name = "global-router"
+    mock_deploy.metadata.namespace = "infra"
+    mock_deploy.metadata.annotations = {}
+    mock_deploy.metadata.labels = {"app": "global-router"}
+    mock_deploy.spec.replicas = 2
+    mock_deploy.status.ready_replicas = 2
+    mock_deploy.status.updated_replicas = 2
+    mock_c = MagicMock()
+    mock_c.name = "router"
+    mock_c.image = "router:v1"
+    mock_deploy.spec.template.spec.containers = [mock_c]
+
+    mock_apps = MagicMock()
+    mock_apps.list_deployment_for_all_namespaces.return_value.items = [mock_deploy]
+    mock_apps.list_replica_set_for_all_namespaces.return_value.items = []
+    mock_core = MagicMock()
+    mock_core.list_pod_for_all_namespaces.return_value.items = []
+    mock_core.list_event_for_all_namespaces.return_value.items = []
+
+    collector = KubernetesCollector(apps_api=mock_apps, core_api=mock_core)
+
+    async with TemporalStore(db_path=db_path) as store:
+        # broad_read_opt_in allows sync_all to collect cluster-wide telemetry
+        results = await collector.sync_all(store)
+        assert results["deployments"] == 1
+        ent = await store.get_entity("deploy-broad-01")
+        assert ent is not None
+        assert ent.name == "global-router"
+
+    # But action execution STILL acts on nothing because allowed_namespaces is empty
+    executor = KubernetesRollbackExecutor(
+        apps_api=mock_apps,
+        allowlisted_namespaces=test_settings.kubernetes.allowed_namespaces,  # []
+    )
+    try:
+        envelope = ActionEnvelope(
+            incident_id="inc-broad-read-01",
+            action_name="A1_ROLLBACK",
+            namespace="infra",
+            target_name="global-router",
+            target_uid="deploy-broad-01",
+            approver="operator-1",
+        )
+        with pytest.raises(PreconditionFailedError) as exc_info:
+            executor.check_preconditions(envelope)
+
+        assert "not in allowlist" in str(exc_info.value)
+    finally:
+        executor.audit_logger.close()

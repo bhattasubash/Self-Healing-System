@@ -211,6 +211,13 @@ class KubernetesSettings(BaseSettings):
             "Default empty (default deny)."
         ),
     )
+    broad_read_opt_in: bool = Field(
+        default=False,
+        description=(
+            "Explicit opt-in to allow cluster-wide read-only observation/collection "
+            "when allowed_namespaces is empty. Does NOT grant remediation or execution permissions."
+        ),
+    )
     watch_enabled: bool = Field(
         default=True,
         description="Whether to run real-time blocking watches off the event loop.",
@@ -223,6 +230,15 @@ class KubernetesSettings(BaseSettings):
             "considered stale (caps tier at B/C)."
         ),
     )
+    workload_cooldown_seconds: int = Field(
+        default=1800,
+        ge=0,
+        description=(
+            "Cooldown window in seconds before another remediation action can be executed "
+            "on the same workload (PRD F-09/F-10)."
+        ),
+    )
+
 
 
 class Settings(BaseSettings):

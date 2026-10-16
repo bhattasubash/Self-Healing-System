@@ -4,7 +4,7 @@
   "description": "Privacy-first local MCP Node client for telemetry tool queries via JSON-RPC. Zero data egress.",
   "type": "module",
   "engines": {
-    "node": ">=20.0.0"
+    "node": ">=22.12.0"
   },
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -38,7 +38,7 @@
     "rimraf": "^6.0.1",
     "tsx": "^4.19.0",
     "typescript": "^5.8.3",
-    "vitest": "^3.1.0"
+    "vitest": "^5.0.5"
   },
   "files": [
     "dist",

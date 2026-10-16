@@ -49,11 +49,11 @@ const logger = pino({
 
 // ─── Session & Masking Lifecycle ──────────────────────────────────────
 
-const activeSessionId = process.env["MCP_SESSION_ID"] ?? uuidv4();
+const runId = process.env["MCP_SESSION_ID"] ?? uuidv4();
 const masker = new ReversibleMasker();
 
 logger.info(
-  { sessionId: activeSessionId },
+  { runId },
   "Initializing local MCP SRE Client runtime shell",
 );
 
@@ -269,7 +269,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const timer = setTimeout(() => abortController.abort(), timeoutMs);
 
   const executionContext: ToolExecutionContext = {
-    sessionId: activeSessionId,
+    sessionId: runId,
     timeoutMs,
     signal: abortController.signal,
   };
@@ -297,7 +297,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       tool_name: toolDef.name,
       arguments: masker.maskObject(rawArguments) as Record<string, unknown>,
       timestamp: new Date().toISOString(),
-      session_id: activeSessionId,
+      session_id: runId,
       status: "success",
       masked: true,
       result: toolResult,
@@ -368,7 +368,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       tool_name: toolDef.name,
       arguments: masker.maskObject(rawArguments) as Record<string, unknown>,
       timestamp: new Date().toISOString(),
-      session_id: activeSessionId,
+      session_id: runId,
       status: toolError.code === "TOOL_TIMEOUT" ? "timeout" : "error",
       masked: true,
       result: null,

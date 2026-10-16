@@ -244,6 +244,34 @@ class TemporalStore:
                 created_at=datetime.fromisoformat(row["created_at"]),
             )
 
+    async def get_all_entities(self, namespace: str | None = None) -> list[EntityRecord]:
+        """Retrieves all registered entities, optionally filtered by namespace."""
+        return await asyncio.to_thread(self._get_all_entities_sync, namespace)
+
+    get_entities = get_all_entities
+
+    def _get_all_entities_sync(self, namespace: str | None = None) -> list[EntityRecord]:
+        with self._get_connection() as conn:
+            if namespace:
+                rows = conn.execute(
+                    "SELECT uid, kind, namespace, name, created_at FROM entities WHERE namespace = ?",
+                    (namespace,),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT uid, kind, namespace, name, created_at FROM entities"
+                ).fetchall()
+            return [
+                EntityRecord(
+                    uid=row["uid"],
+                    kind=row["kind"],
+                    namespace=row["namespace"],
+                    name=row["name"],
+                    created_at=datetime.fromisoformat(row["created_at"]),
+                )
+                for row in rows
+            ]
+
     async def get_changes_for_entity(self, entity_uid: str) -> list[ChangeRecord]:
         """Retrieves all changes recorded for an entity ordered by valid_from."""
         return await asyncio.to_thread(self._get_changes_for_entity_sync, entity_uid)
@@ -628,6 +656,18 @@ class TemporalStore:
         if self._conn is not None:
             self._conn.close()
             self._conn = None
+
+    def __enter__(self) -> TemporalStore:
+        return self
+
+    def __exit__(self, *args: Any) -> None:
+        self.close()
+
+    async def __aenter__(self) -> TemporalStore:
+        return self
+
+    async def __aexit__(self, *args: Any) -> None:
+        self.close()
 
     def __del__(self) -> None:
         if getattr(self, "_conn", None) is not None:

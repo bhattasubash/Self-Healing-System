@@ -59,7 +59,7 @@ class SQLiteApprovalRegistry:
 
     def _init_db(self) -> None:
         with self._conn:
-            self._conn.execute(
+            self._conn.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS approvals (
                     approval_id TEXT PRIMARY KEY,
@@ -78,6 +78,8 @@ class SQLiteApprovalRegistry:
                     execution_status TEXT,
                     audit_hash TEXT
                 );
+                CREATE INDEX IF NOT EXISTS idx_approvals_workload
+                    ON approvals (namespace, target_service);
                 """
             )
 
@@ -172,9 +174,81 @@ class SQLiteApprovalRegistry:
                 ),
             )
 
+    def get_in_progress_approvals(self) -> list[ApprovalRecord]:
+        """Finds all approvals currently in 'in_progress' execution state (crash recovery)."""
+        with self._conn:
+            rows = self._conn.execute(
+                "SELECT * FROM approvals WHERE execution_status = 'in_progress'"
+            ).fetchall()
+            return [self._row_to_record(row) for row in rows]
+
+    def check_workload_action_allowed(
+        self,
+        namespace: str,
+        target_service: str,
+        cooldown_seconds: int = 1800,
+        current_approval_id: str | None = None,
+    ) -> tuple[bool, str | None]:
+        """
+        Enforces PRD F-09 / F-10 safety invariants:
+        1. Per-workload lock: only one active action per workload at a time.
+        2. Cooldown: reject subsequent actions on a workload within cooldown_seconds.
+
+        Returns:
+            (allowed: bool, rejection_reason: str | None)
+        """
+        if not target_service:
+            return True, None
+
+        with self._conn:
+            # 1. Per-workload lock: check if an action is currently in progress
+            active_row = self._conn.execute(
+                """
+                SELECT approval_id, incident_id FROM approvals
+                WHERE namespace = ? AND target_service = ? AND LOWER(execution_status) = 'in_progress'
+                AND approval_id != ?
+                """,
+                (namespace, target_service, current_approval_id or ""),
+            ).fetchone()
+
+            if active_row:
+                return False, (
+                    f"Action rejected: Workload '{namespace}/{target_service}' currently has "
+                    f"an active remediation in progress (Approval ID: {active_row['approval_id']})."
+                )
+
+            # 2. Cooldown check: reject if another action completed recently
+            if cooldown_seconds > 0:
+                recent_row = self._conn.execute(
+                    """
+                    SELECT approval_id, decided_at, execution_status FROM approvals
+                    WHERE namespace = ? AND target_service = ? AND decided_at IS NOT NULL
+                    AND approval_id != ? AND LOWER(status) = 'approved'
+                    ORDER BY decided_at DESC LIMIT 1
+                    """,
+                    (namespace, target_service, current_approval_id or ""),
+                ).fetchone()
+
+                if recent_row and recent_row["decided_at"]:
+                    decided_dt = datetime.fromisoformat(recent_row["decided_at"])
+                    now = datetime.now(UTC)
+                    if decided_dt.tzinfo is None:
+                        decided_dt = decided_dt.replace(tzinfo=UTC)
+                    elapsed = (now - decided_dt).total_seconds()
+                    if elapsed < cooldown_seconds:
+                        remaining = int(cooldown_seconds - elapsed)
+                        cooldown_until = (decided_dt + timedelta(seconds=cooldown_seconds)).isoformat()
+                        return False, (
+                            f"Action rejected: Workload '{namespace}/{target_service}' is in "
+                            f"cooldown until {cooldown_until} ({remaining}s remaining, PRD F-09/F-10)."
+                        )
+
+        return True, None
+
     def clear(self) -> None:
         with self._conn:
             self._conn.execute("DELETE FROM approvals;")
+
 
     def _row_to_record(self, row: sqlite3.Row) -> ApprovalRecord:
         return ApprovalRecord(
@@ -194,3 +268,19 @@ class SQLiteApprovalRegistry:
             execution_status=row["execution_status"],
             audit_hash=row["audit_hash"],
         )
+
+    def close(self) -> None:
+        """Closes the underlying SQLite connection."""
+        if self._conn is not None:
+            self._conn.close()
+            self._conn = None
+
+    def __enter__(self) -> SQLiteApprovalRegistry:
+        return self
+
+    def __exit__(self, *args: Any) -> None:
+        self.close()
+
+    def __del__(self) -> None:
+        if getattr(self, "_conn", None) is not None:
+            self.close()

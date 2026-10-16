@@ -28,3 +28,43 @@ def validate_incident_id(incident_id: str) -> str:
         )
 
     return cleaned
+
+
+ALLOWED_SLACK_HOST = "hooks.slack.com"
+
+
+def validate_slack_response_url(url: str | None) -> str | None:
+    """
+    Validates a Slack response_url ensuring:
+    - If None or empty, returns None.
+    - Scheme must be strictly 'https'.
+    - Hostname must be strictly 'hooks.slack.com' (no port, no userinfo, no alternate domains).
+    - Prevents SSRF attacks.
+    """
+    if not url:
+        return None
+
+    cleaned = url.strip()
+    try:
+        import urllib.parse
+
+        parsed = urllib.parse.urlsplit(cleaned)
+    except Exception as exc:
+        raise ValueError(f"Malformed response_url: {exc}") from exc
+
+    if parsed.scheme.lower() != "https":
+        raise ValueError(f"Invalid response_url scheme '{parsed.scheme}': must use https")
+
+    if parsed.netloc.lower() != ALLOWED_SLACK_HOST or (parsed.hostname or "").lower() != ALLOWED_SLACK_HOST:
+        raise ValueError(
+            f"Invalid response_url host '{parsed.netloc}': host must be {ALLOWED_SLACK_HOST}"
+        )
+
+    if parsed.port is not None:
+        raise ValueError("Invalid response_url: custom ports are not allowed")
+
+    if parsed.username or parsed.password:
+        raise ValueError("Invalid response_url: user credentials in URL are not allowed")
+
+    return cleaned
+
