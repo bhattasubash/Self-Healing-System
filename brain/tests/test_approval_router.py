@@ -15,12 +15,15 @@ Verifies:
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import json
 import time
 import urllib.parse
 from datetime import UTC, datetime
+from typing import Any
+from unittest.mock import MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -509,8 +512,6 @@ def test_crash_recovery_on_startup_reconciles_in_progress_approvals() -> None:
     (simulating a crash mid-execution), reconciles against cluster state,
     marks them as 'needs_human_review', creates an audit entry, and alerts Slack.
     """
-    from unittest.mock import MagicMock, patch
-
     reg = get_approval_registry()
     reg.clear()
 
@@ -635,6 +636,75 @@ def test_concurrent_approvals_for_same_workload_rejected(client: TestClient) -> 
         assert "active remediation in progress" in detail
         assert "payments/payment-gw" in detail
         assert "appr-workload-active" in detail
+    finally:
+        app.dependency_overrides.pop(get_settings, None)
+
+
+@pytest.mark.asyncio
+async def test_concurrent_workload_lock_race_asyncio_gather() -> None:
+    """
+    Requirement 3 / F-09 / F-10: True concurrent execution race using asyncio.gather.
+    When two approval requests for the same workload are submitted simultaneously,
+    exactly one succeeds (HTTP 200, in_progress) and the other is rejected with HTTP 409
+    due to the atomic SQLite transaction and unique index constraint.
+    """
+    reg = get_approval_registry()
+    reg.clear()
+
+    # 1. Register two separate pending approvals for the same workload (payments/payment-gw)
+    reg.register_request(
+        approval_id="appr-race-1",
+        incident_id="inc-race-01",
+        target_service="payment-gw",
+        namespace="payments",
+        allowed_roles=["admin"],
+    )
+    reg.register_request(
+        approval_id="appr-race-2",
+        incident_id="inc-race-02",
+        target_service="payment-gw",
+        namespace="payments",
+        allowed_roles=["admin"],
+    )
+
+    def get_test_settings() -> Settings:
+        s = Settings()
+        s.slack.dev_mode = True
+        return s
+
+    app.dependency_overrides[get_settings] = get_test_settings
+    try:
+        import httpx
+
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as ac:
+            res1, res2 = await asyncio.gather(
+                ac.post(
+                    "/api/v1/approval/decision",
+                    json={
+                        "approval_id": "appr-race-1",
+                        "incident_id": "inc-race-01",
+                        "decision": "approved",
+                        "decided_by": "U_ADMIN_1",
+                    },
+                ),
+                ac.post(
+                    "/api/v1/approval/decision",
+                    json={
+                        "approval_id": "appr-race-2",
+                        "incident_id": "inc-race-02",
+                        "decision": "approved",
+                        "decided_by": "U_ADMIN_2",
+                    },
+                ),
+            )
+
+        status_codes = sorted([res1.status_code, res2.status_code])
+        assert status_codes == [200, 409], f"Expected [200, 409] but got {status_codes}"
+
+        res_409 = res1 if res1.status_code == 409 else res2
+        detail = res_409.json()["detail"]
+        assert "active remediation in progress" in detail
     finally:
         app.dependency_overrides.pop(get_settings, None)
 

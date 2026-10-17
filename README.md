@@ -2,12 +2,18 @@
 
 An edge-first, safety-critical Kubernetes remediation agent that detects bad-change incidents, evaluates deterministic evidence gates on historical telemetry, and executes a strictly allowlisted set of reversible actions under customer-owned policy.
 
+> **P0 Status**: **Substantially done** (direct deployment rollback A1, relational bi-temporal store, deterministic evidence gate R1–R8, async Slack approval loop with crash recovery, atomic workload lock and cooldown, live Kind cluster verification).
+
 ---
 
 ## 🏛️ Architecture Overview
 
 ```
-                      [ Cluster Infrastructure / Alertmanager ]
+                  [ Kubernetes Cluster (API & Watch Streams) ]
+                                        │
+                                        │ (Direct K8s API watches & alerts)
+                                        ▼
+                         [ FastAPI Analytical Brain ]
                                         │
                                         ▼
                          [ Edge Ingress & Content Scanner ]
@@ -25,9 +31,16 @@ An edge-first, safety-critical Kubernetes remediation agent that detects bad-cha
                      ▼                                     ▼
            [ Tier A / B Eligible ]               [ Tier C Escalation ]
                      │                            (Irreversible / GitOps /
-                     ▼                             Concurrent rollout)
-            [ Slack Block Kit Card ]
-         (HMAC signature + 15m TTL)
+                     │                             Concurrent rollout)
+                     ├─────────────────────────────────────┐
+                     │                                     │
+                     ▼                                     ▼
+        [ LLM Explanation Layer ]                 [ Egress Ledger ]
+               (Planned)                              (Planned)
+                     │
+                     ▼
+       [ Slack Block Kit Card (illustrative) ]
+             (HMAC signature + 15m TTL)
                      │
            ┌─────────┴─────────┐
            ▼                   ▼
@@ -37,7 +50,8 @@ An edge-first, safety-critical Kubernetes remediation agent that detects bad-cha
     [ Typed Action A1 ]     [ Abort & Audit ]
     - Server dry-run diff
     - Namespaced UID bind
-    - AppsV1Api rollback
+    - Direct K8s API rollback
+      (Brain -> AppsV1Api)
     - Verification check
     - (Single auto-undo)
            │
@@ -62,7 +76,7 @@ Every claim in Project Heal is tagged as **[M] Measured**, **[T] Target**, or **
 | **Production Safety** | Typed action allowlist with dry-run diff. | Sandboxes validate generated artifacts (manifests, policy tests), not production safety. Production safety comes from server-side dry-run diffs, policy gates, verification stabilization, and at most one automatic undo. | **[M]** 107 brain unit tests + 5 live kind cluster tests verified ([CI Run #23](https://github.com/bhattasubash/Self-Healing-System/actions/runs/38731022831)); 115 brain tests + 8 lab scenarios verified locally `[unverified in remote CI until PR run completes]` |
 | **Root Cause & Execution** | Deterministic Evidence Gate (Rules R1–R8). | Best LLMs achieve ~25% accuracy on root-cause analysis; therefore deterministic rules decide proposals. The LLM only explains, cites evidence IDs, and lists unknowns. No LLM-authored text is ever executed. | **[M]** Evaluated deterministically across T-01 to T-28 matrix ([CI Run #23](https://github.com/bhattasubash/Self-Healing-System/actions/runs/38731022831)) |
 | **Telemetry History** | Relational bi-temporal change timeline. | Kubernetes events expire after 1 hour. Project Heal tracks change records with `valid_from`, `valid_to`, and `recorded_at` in an append-only relational SQLite store. | **[M]** Bi-temporal snapshot and diff verified ([CI Run #23](https://github.com/bhattasubash/Self-Healing-System/actions/runs/38731022831)) |
-| **GitOps Awareness** | Argo CD & Flux automatic detection. | If automated sync / self-heal is active, direct Kubernetes rollback is blocked. The agent routes to an A2 GitOps revert PR instead. | **[M]** Argo CD instance label guard verified ([CI Run #23](https://github.com/bhattasubash/Self-Healing-System/actions/runs/38731022831)) |
+| **GitOps Awareness** | Argo CD & Flux automatic detection. | If automated sync / self-heal is active, direct Kubernetes rollback is blocked. The agent routes to an A2 GitOps revert PR instead (we did not find GitOps handling discussed in the sources we reviewed). | **[M]** Argo CD instance label guard verified ([CI Run #23](https://github.com/bhattasubash/Self-Healing-System/actions/runs/38731022831)) |
 | **Audit Integrity** | SHA-256 append-only hash chain. | Every triage decision, dry-run diff, human approval, execution, and verification result is hashed into an immutable chain. If an audit write fails, execution aborts. | **[M]** Tamper detection and fail-closed audit verified ([CI Run #23](https://github.com/bhattasubash/Self-Healing-System/actions/runs/38731022831)) |
 
 ---
@@ -110,7 +124,7 @@ Every claim in Project Heal is tagged as **[M] Measured**, **[T] Target**, or **
 │   ├── test_lab_scenarios.py          # Automated verification for T-01, T-02, T-04, T-09
 │   └── README.md
 │
-├── packages/                          # TypeScript MCP Client
+├── packages/                          # Optional TypeScript MCP Client (parked P2, not in live path)
 │   └── mcp-client/
 │       ├── src/
 │       │   ├── index.ts               # MCP Server entrypoint (stdio JSON-RPC)
@@ -120,7 +134,7 @@ Every claim in Project Heal is tagged as **[M] Measured**, **[T] Target**, or **
 │
 └── .github/workflows/                 # CI/CD and Security Gates
     ├── ci.yml                         # Brain tests, coverage gate (>= 80%), MCP client
-    └── security.yml                   # Bandit, pip-audit, and secret scanning
+    └── security.yml                   # CodeQL, pip-audit, and secret scanning
 ```
 
 ---
@@ -158,6 +172,7 @@ pytest lab/test_lab_scenarios.py -v
 - **Chaos Lab Scenarios**: 8/8 passing locally (`lab/test_lab_scenarios.py`) `[unverified in remote CI until PR run completes]`.
 - **Real Cluster Proof (Kind Gate G0)**: 5/5 passing in CI ([CI Run #23](https://github.com/bhattasubash/Self-Healing-System/actions/runs/38731022831)); expanded to include T-06, T-07, T-09, T-13 in `lab/test_real_cluster.py` `[unverified in remote CI until PR run completes]`.
 - **MCP Client**: 14/14 passing (`packages/mcp-client/`), strict TypeScript compile clean ([CI Run #23](https://github.com/bhattasubash/Self-Healing-System/actions/runs/38731022831)).
+- **Structured Logging**: `structlog` JSON logging across all FastAPI routes and background lifespan tasks.
 - **Static Security & Linting**:
   - `ruff check app tests`: clean, 0 findings ([CI Run #23](https://github.com/bhattasubash/Self-Healing-System/actions/runs/38731022831)).
   - `mypy --explicit-package-bases app`: clean, 0 findings across 22 source files ([CI Run #23](https://github.com/bhattasubash/Self-Healing-System/actions/runs/38731022831)).

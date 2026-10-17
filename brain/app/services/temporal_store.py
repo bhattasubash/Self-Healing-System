@@ -254,7 +254,8 @@ class TemporalStore:
         with self._get_connection() as conn:
             if namespace:
                 rows = conn.execute(
-                    "SELECT uid, kind, namespace, name, created_at FROM entities WHERE namespace = ?",
+                    "SELECT uid, kind, namespace, name, created_at "
+                    "FROM entities WHERE namespace = ?",
                     (namespace,),
                 ).fetchall()
             else:

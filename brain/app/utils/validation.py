@@ -37,6 +37,7 @@ def validate_slack_response_url(url: str | None) -> str | None:
     """
     Validates a Slack response_url ensuring:
     - If None or empty, returns None.
+    - URL must strictly start with 'https://hooks.slack.com/'.
     - Scheme must be strictly 'https'.
     - Hostname must be strictly 'hooks.slack.com' (no port, no userinfo, no alternate domains).
     - Prevents SSRF attacks.
@@ -45,6 +46,13 @@ def validate_slack_response_url(url: str | None) -> str | None:
         return None
 
     cleaned = url.strip()
+
+    # CodeQL SSRF recognition check: must start with the trusted base URL prefix
+    if not cleaned.startswith("https://hooks.slack.com/"):
+        raise ValueError(
+            f"Invalid response_url: must start with 'https://{ALLOWED_SLACK_HOST}/'"
+        )
+
     try:
         import urllib.parse
 
@@ -55,7 +63,10 @@ def validate_slack_response_url(url: str | None) -> str | None:
     if parsed.scheme.lower() != "https":
         raise ValueError(f"Invalid response_url scheme '{parsed.scheme}': must use https")
 
-    if parsed.netloc.lower() != ALLOWED_SLACK_HOST or (parsed.hostname or "").lower() != ALLOWED_SLACK_HOST:
+    if (
+        parsed.netloc.lower() != ALLOWED_SLACK_HOST
+        or (parsed.hostname or "").lower() != ALLOWED_SLACK_HOST
+    ):
         raise ValueError(
             f"Invalid response_url host '{parsed.netloc}': host must be {ALLOWED_SLACK_HOST}"
         )

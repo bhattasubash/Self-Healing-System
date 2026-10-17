@@ -111,8 +111,12 @@ class KubernetesCollector:
             return default
 
         replicas = _to_int(getattr(spec, "replicas", 1) if spec else 1, default=1)
-        ready_replicas = _to_int(getattr(status, "ready_replicas", 0) if status else 0, default=0)
-        updated_replicas = _to_int(getattr(status, "updated_replicas", 0) if status else 0, default=0)
+        ready_replicas = _to_int(
+            getattr(status, "ready_replicas", 0) if status else 0, default=0
+        )
+        updated_replicas = _to_int(
+            getattr(status, "updated_replicas", 0) if status else 0, default=0
+        )
 
         after_state = {
             "revision": revision,
@@ -127,9 +131,10 @@ class KubernetesCollector:
             f"Deployment {name} {change_source} (rev {revision}, "
             f"replicas {ready_replicas}/{replicas})"
         )
+        c_type = "DEPLOYMENT_SYNC" if change_source == "k8s_collector" else "DEPLOYMENT_WATCH"
         change = ChangeRecord(
             entity_uid=str(uid),
-            change_type="DEPLOYMENT_SYNC" if change_source == "k8s_collector" else "DEPLOYMENT_WATCH",
+            change_type=c_type,
             summary=summary,
             before_state={},
             after_state=after_state,

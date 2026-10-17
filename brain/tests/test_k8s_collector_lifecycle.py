@@ -261,7 +261,11 @@ async def test_empty_allowed_namespaces_collects_nothing_and_acts_on_nothing(tmp
     """
     from app.config import Settings
     from app.main import create_app, lifespan
-    from app.services.k8s_executor import ActionEnvelope, KubernetesRollbackExecutor, PreconditionFailedError
+    from app.services.k8s_executor import (
+        ActionEnvelope,
+        KubernetesRollbackExecutor,
+        PreconditionFailedError,
+    )
 
     db_path = str(tmp_path / "empty_ns.db")
     test_settings = Settings()
@@ -313,13 +317,19 @@ async def test_empty_allowed_namespaces_collects_nothing_and_acts_on_nothing(tmp
 
 
 @pytest.mark.asyncio
-async def test_broad_read_opt_in_allows_read_only_collection_but_acts_on_nothing(tmp_path: Any) -> None:
+async def test_broad_read_opt_in_allows_read_only_collection_but_acts_on_nothing(
+    tmp_path: Any,
+) -> None:
     """
     Requirement 2 (opt-in): broad_read_opt_in allows broad cluster read telemetry collection,
     while action execution strictly requires explicit allowed_namespaces and rejects actions.
     """
     from app.config import Settings
-    from app.services.k8s_executor import ActionEnvelope, KubernetesRollbackExecutor, PreconditionFailedError
+    from app.services.k8s_executor import (
+        ActionEnvelope,
+        KubernetesRollbackExecutor,
+        PreconditionFailedError,
+    )
 
     db_path = str(tmp_path / "broad_read.db")
     test_settings = Settings()

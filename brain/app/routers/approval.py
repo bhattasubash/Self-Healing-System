@@ -469,7 +469,9 @@ async def process_approval_decision(
         try:
             response_url = validate_slack_response_url(response_url)
         except ValueError as val_err:
-            logger.warning("invalid_slack_response_url", response_url=response_url, error=str(val_err))
+            logger.warning(
+                "invalid_slack_response_url", response_url=response_url, error=str(val_err)
+            )
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"Invalid response_url: {val_err}",
@@ -573,15 +575,15 @@ async def process_approval_decision(
     execution_status: str | None = None
     audit_hash: str | None = None
     if decision_norm == "approved":
-        # Enforce PRD F-09/F-10 per-workload lock and cooldown
+        # Enforce PRD F-09/F-10 per-workload lock and cooldown atomically
         cooldown_sec = getattr(settings.kubernetes, "workload_cooldown_seconds", 1800)
-        allowed, reject_reason = registry.check_workload_action_allowed(
-            namespace=record.namespace,
-            target_service=record.target_service,
+        acquired, reject_reason, updated_rec = registry.acquire_workload_lock(
+            approval_id=record.approval_id,
+            decided_by=decided_by,
+            decision_reason=decision_reason,
             cooldown_seconds=cooldown_sec,
-            current_approval_id=record.approval_id,
         )
-        if not allowed:
+        if not acquired or updated_rec is None:
             logger.warning(
                 "workload_action_gate_rejected",
                 approval_id=record.approval_id,
@@ -608,9 +610,8 @@ async def process_approval_decision(
                 detail=reject_reason,
             )
 
+        record = updated_rec
         execution_status = "in_progress"
-        record.execution_status = "in_progress"
-        registry.update_record(record)
         t = _schedule_task(
             _async_execute_rollback_and_notify_slack(record.approval_id, response_url)
         )
@@ -788,9 +789,9 @@ def reconcile_in_progress_approvals_on_startup(
             from kubernetes import client, config
 
             try:
-                config.load_incluster_config()
+                config.load_incluster_config()  # type: ignore[no-untyped-call]
             except Exception:
-                config.load_kube_config()
+                config.load_kube_config()  # type: ignore[no-untyped-call]
             api = client.AppsV1Api()
         except Exception as k8s_err:
             logger.warning("crash_recovery_k8s_client_init_failed", error=str(k8s_err))

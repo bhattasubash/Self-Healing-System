@@ -55,21 +55,30 @@ def test_validate_slack_response_url_valid() -> None:
 
 
 def test_validate_slack_response_url_rejects_insecure_or_untrusted_hosts() -> None:
-    # Scheme must be https
-    with pytest.raises(ValueError, match="must use https"):
+    # Scheme must be https (http:// rejection)
+    with pytest.raises(ValueError):
         validate_slack_response_url("http://hooks.slack.com/actions/T123/B456/abcdef")
 
-    # Untrusted domain
-    with pytest.raises(ValueError, match="must be hooks.slack.com"):
+    # Specific test cases:
+    # 1. Subdomain spoofing: hooks.slack.com.evil.com
+    with pytest.raises(ValueError):
+        validate_slack_response_url("https://hooks.slack.com.evil.com/webhook")
+
+    # 2. Path confusion: evil.com/hooks.slack.com
+    with pytest.raises(ValueError):
+        validate_slack_response_url("https://evil.com/hooks.slack.com")
+
+    # 3. Userinfo / credential spoofing: hooks.slack.com@evil.com
+    with pytest.raises(ValueError):
+        validate_slack_response_url("https://hooks.slack.com@evil.com/webhook")
+
+    # 4. Untrusted arbitrary domain
+    with pytest.raises(ValueError):
         validate_slack_response_url("https://malicious.example.com/webhook")
 
-    # Subdomain spoofing
-    with pytest.raises(ValueError, match="must be hooks.slack.com"):
-        validate_slack_response_url("https://hooks.slack.com.attacker.com/webhook")
-
-    # Non-standard port or credentials
-    with pytest.raises(ValueError, match="must be hooks.slack.com"):
+    # 5. Non-standard port or credentials on genuine host
+    with pytest.raises(ValueError):
         validate_slack_response_url("https://hooks.slack.com:8443/actions/T123")
-    with pytest.raises(ValueError, match="must be hooks.slack.com"):
+    with pytest.raises(ValueError):
         validate_slack_response_url("https://user:pass@hooks.slack.com/actions/T123")
 

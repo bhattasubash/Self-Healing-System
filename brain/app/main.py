@@ -15,7 +15,7 @@ import asyncio
 import sys
 import threading
 from contextlib import asynccontextmanager, suppress
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import structlog
 import uvicorn
@@ -91,7 +91,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         broad_read = settings.kubernetes.broad_read_opt_in
         watch_enabled = settings.kubernetes.watch_enabled
 
-        # Namespace policy: empty allowed_namespaces means collect nothing unless broad_read_opt_in is True
+        # Namespace policy: empty allowed_namespaces means collect nothing
+        # unless broad_read_opt_in is True
         should_collect = bool(allowed_ns) or broad_read
 
         if not should_collect:
